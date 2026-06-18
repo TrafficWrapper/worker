@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -31,6 +32,10 @@ type approvedDevice struct {
 	InternalIP   string `json:"internal_ip"`
 	PSK2         string `json:"psk2"`
 	Status       string `json:"status"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+	Limits       struct {
+		ExpiresAt *string `json:"expires_at,omitempty"`
+	} `json:"limits,omitempty"`
 }
 
 type workerConfigDocument struct {
@@ -57,8 +62,13 @@ type awgDesiredPeer struct {
 }
 
 type awgPeerConfig struct {
-	PublicKeyHex string
-	AllowedIPs   []string
+	PublicKeyHex      string
+	AllowedIPs        []string
+	Endpoint          string
+	RxBytes           uint64
+	TxBytes           uint64
+	LastHandshakeSec  int64
+	LastHandshakeNSec int64
 }
 
 func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON string) error {
@@ -169,12 +179,16 @@ func writeAWGPeerRegistry(cfg envConfig, st stateFile, devices []approvedDevice)
 		if _, ok := seen[device.AWGPublicKey]; ok {
 			continue
 		}
+		deviceExpires := expires
+		if parsed, ok := approvedDeviceExpiry(device); ok {
+			deviceExpires = parsed
+		}
 		seen[device.AWGPublicKey] = struct{}{}
 		clients = append(clients, awgPeerRegistryClient{
 			WGPublicKey: device.AWGPublicKey,
 			InternalIP:  device.InternalIP,
 			PSK2:        device.PSK2,
-			ExpiresAt:   expires,
+			ExpiresAt:   deviceExpires,
 		})
 		desired = append(desired, awgDesiredPeer{
 			PublicKey: device.AWGPublicKey,
@@ -186,6 +200,22 @@ func writeAWGPeerRegistry(cfg envConfig, st stateFile, devices []approvedDevice)
 		return nil, err
 	}
 	return desired, nil
+}
+
+func approvedDeviceExpiry(device approvedDevice) (time.Time, bool) {
+	value := strings.TrimSpace(device.ExpiresAt)
+	if value == "" && device.Limits.ExpiresAt != nil {
+		value = strings.TrimSpace(*device.Limits.ExpiresAt)
+	}
+	if value == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		log.Printf("approved device %s has invalid expires_at %q: %v", device.DeviceID, value, err)
+		return time.Time{}, false
+	}
+	return parsed.UTC(), true
 }
 
 func syncAWGUAPI(socketPath string, desired []awgDesiredPeer) error {
@@ -291,6 +321,26 @@ func listAWGPeerConfigs(socketPath string) ([]awgPeerConfig, error) {
 		case "allowed_ip":
 			if current >= 0 {
 				peers[current].AllowedIPs = append(peers[current].AllowedIPs, value)
+			}
+		case "endpoint":
+			if current >= 0 {
+				peers[current].Endpoint = value
+			}
+		case "rx_bytes":
+			if current >= 0 {
+				peers[current].RxBytes, _ = strconv.ParseUint(value, 10, 64)
+			}
+		case "tx_bytes":
+			if current >= 0 {
+				peers[current].TxBytes, _ = strconv.ParseUint(value, 10, 64)
+			}
+		case "last_handshake_time_sec":
+			if current >= 0 {
+				peers[current].LastHandshakeSec, _ = strconv.ParseInt(value, 10, 64)
+			}
+		case "last_handshake_time_nsec":
+			if current >= 0 {
+				peers[current].LastHandshakeNSec, _ = strconv.ParseInt(value, 10, 64)
 			}
 		}
 	}

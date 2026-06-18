@@ -30,6 +30,25 @@ For worker-specific failures, start with enrollment values
 `ORCH_URL`, `ORCH_STATIC_PUBLIC_KEY`, `ENROLL_TOKEN`, `ORCH_INSECURE_TLS`, and
 `CAMOUFLAGE_DOMAIN`.
 
+## Diagnostics
+
+The worker agent exposes `/healthz`, `/self-describe`, and `/metrics` on the
+local agent port (`127.0.0.1:9090` through the default Compose mapping). The
+Prometheus metrics endpoint is intended for localhost scraping because AWG peer
+labels include public keys, allowed IPs, and endpoints.
+
+For optional wire-level AWG stealth checks, use `tools/dpi_probe.py` as root on
+the worker host with `tcpdump` installed:
+
+```sh
+sudo python3 tools/dpi_probe.py --interface <iface> --dialect /worker-state/awg/awg-gw.json --json
+python3 tools/dpi_probe.py --pcap capture.pcap --dialect /worker-state/awg/awg-gw.json --awg-port <udp-port>
+```
+
+The probe reads the public worker dialect envelope (`listen_port` + `dialect`)
+and reports whether WG magic headers are absent, padded handshakes are visible,
+vanilla handshakes are absent, and pre-handshake junk matches the dialect.
+
 ## What Is Included
 
 - `agent/` — pulls signed bundles from the orchestrator and applies state.

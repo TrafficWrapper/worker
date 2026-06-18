@@ -1,0 +1,50 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+)
+
+const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
+
+func metricsHandler(cfg envConfig, startedAt time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", metricsContentType)
+		peers, err := listAWGPeerConfigs(cfg.AWGUAPISocket)
+		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintf(w, "tw_worker_awg_interface_up{interface=%q} 0\n", awgMetricsInterface())
+			_, _ = fmt.Fprintf(w, "tw_worker_awg_scrape_error{interface=%q,error=%q} 1\n", awgMetricsInterface(), err.Error())
+			return
+		}
+		writeAWGMetrics(w, awgMetricsInterface(), startedAt, peers)
+	}
+}
+
+func writeAWGMetrics(w io.Writer, iface string, startedAt time.Time, peers []awgPeerConfig) {
+	_, _ = fmt.Fprintf(w, "tw_worker_awg_interface_up{interface=%q} 1\n", iface)
+	_, _ = fmt.Fprintf(w, "tw_worker_awg_peer_count{interface=%q} %d\n", iface, len(peers))
+	_, _ = fmt.Fprintf(w, "tw_worker_awg_metrics_uptime_seconds{interface=%q} %.0f\n", iface, time.Since(startedAt).Seconds())
+	for _, peer := range peers {
+		allowedIPs := append([]string(nil), peer.AllowedIPs...)
+		sort.Strings(allowedIPs)
+		labels := fmt.Sprintf(
+			"interface=%q,peer=%q,allowed_ip=%q,endpoint=%q",
+			iface,
+			peer.PublicKeyHex,
+			strings.Join(allowedIPs, ","),
+			peer.Endpoint,
+		)
+		_, _ = fmt.Fprintf(w, "awg_peer_rx_bytes{%s} %d\n", labels, peer.RxBytes)
+		_, _ = fmt.Fprintf(w, "awg_peer_tx_bytes{%s} %d\n", labels, peer.TxBytes)
+		_, _ = fmt.Fprintf(w, "awg_peer_last_handshake_time_seconds{%s} %d\n", labels, peer.LastHandshakeSec)
+	}
+}
+
+func awgMetricsInterface() string {
+	return "awg1"
+}

@@ -158,6 +158,9 @@ func run(cfg envConfig) error {
 	mux.HandleFunc("/orchestrator/apply-discovery", applyDiscoveryHandler)
 	mux.HandleFunc("/orchestrator/verify-minisign", verifyMinisignHandler)
 	mux.HandleFunc("/orchestrator/telemetry", telemetryHandler(cfg, st))
+	// Compose publishes the agent port on host loopback by default; keep /metrics
+	// on this local agent surface because peer labels expose public keys/endpoints.
+	mux.HandleFunc("/metrics", metricsHandler(cfg, time.Now()))
 
 	srv := &http.Server{Addr: ":9090", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

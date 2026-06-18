@@ -31,6 +31,25 @@ orchestrator:
 `ORCH_STATIC_PUBLIC_KEY`, `ENROLL_TOKEN`, `ORCH_INSECURE_TLS` и
 `CAMOUFLAGE_DOMAIN`.
 
+## Diagnostics
+
+Worker agent отдаёт `/healthz`, `/self-describe` и `/metrics` на локальном agent
+port (`127.0.0.1:9090` через default Compose mapping). Prometheus endpoint
+предназначен для localhost scraping, потому что AWG peer labels содержат public
+keys, allowed IPs и endpoints.
+
+Для optional wire-level AWG stealth checks используйте `tools/dpi_probe.py` под
+root на worker host с установленным `tcpdump`:
+
+```sh
+sudo python3 tools/dpi_probe.py --interface <iface> --dialect /worker-state/awg/awg-gw.json --json
+python3 tools/dpi_probe.py --pcap capture.pcap --dialect /worker-state/awg/awg-gw.json --awg-port <udp-port>
+```
+
+Probe читает public worker dialect envelope (`listen_port` + `dialect`) и
+показывает, отсутствуют ли WG magic headers, видны ли padded handshakes,
+отсутствуют ли vanilla handshakes и совпадает ли pre-handshake junk с dialect.
+
 ## Что внутри
 
 - `agent/` — получает signed bundles от orchestrator и применяет state.

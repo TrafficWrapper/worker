@@ -19,8 +19,8 @@ TrafficWrapper разделён на три репозитория:
 запустить этот worker, approve'нуть его в admin UI, затем bootstrap'ить
 устройства через app.
 
-Архитектура и threat model описаны в [ARCHITECTURE.md](ARCHITECTURE.md) и
-[THREAT_MODEL.md](THREAT_MODEL.md).
+Архитектура и threat model описаны в [ARCHITECTURE.md](ARCHITECTURE.ru.md) и
+[THREAT_MODEL.md](THREAT_MODEL.ru.md).
 
 ## Troubleshooting
 

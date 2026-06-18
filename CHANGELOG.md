@@ -12,7 +12,7 @@ for public releases.
 
 ### Added
 
-- Repository CODEOWNERS, secret-scan workflow, and gitignore hygiene for local Go
+- Secret-scan workflow and gitignore hygiene for local Go
   build binaries.
 - Link from the worker README to the canonical orchestrator troubleshooting
   guide.

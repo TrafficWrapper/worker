@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	netstacktun "github.com/amnezia-vpn/amneziawg-go/tun/netstack"
@@ -20,6 +23,12 @@ const (
 	socksNoAuth         = 0x00
 	socksConnect        = 0x01
 	socksProxyBufferLen = 256 * 1024
+)
+
+var (
+	socksAcceptBackoffMin = 50 * time.Millisecond
+	socksAcceptBackoffMax = 200 * time.Millisecond
+	socksProxyIdleTimeout = 3 * time.Minute
 )
 
 var socksProxyBuffers = sync.Pool{
@@ -73,11 +82,26 @@ func (s *socksServer) close() {
 
 func (s *socksServer) serve() {
 	defer s.wg.Done()
+	backoff := socksAcceptBackoffMin
 	for {
 		client, err := s.listener.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if isTemporaryAcceptError(err) {
+				log.Printf("transport: socks accept temporary error: %v", err)
+				time.Sleep(backoff)
+				backoff *= 2
+				if backoff > socksAcceptBackoffMax {
+					backoff = socksAcceptBackoffMax
+				}
+				continue
+			}
+			log.Printf("transport: socks accept stopped after permanent error: %v", err)
 			return
 		}
+		backoff = socksAcceptBackoffMin
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -222,20 +246,32 @@ func writeSOCKSReply(w io.Writer, code byte) error {
 }
 
 func proxy(left, right net.Conn) error {
-	errCh := make(chan error, 2)
+	deadlines := newProxyDeadlines(left, right, socksProxyIdleTimeout)
+	deadlines.touchRead()
+	type copyResult struct {
+		dst net.Conn
+		err error
+	}
+	errCh := make(chan copyResult, 2)
 	copyConn := func(dst, src net.Conn) {
 		bufPtr := socksProxyBuffers.Get().(*[]byte)
 		defer socksProxyBuffers.Put(bufPtr)
-		_, err := io.CopyBuffer(dst, src, *bufPtr)
-		errCh <- err
+		errCh <- copyResult{dst: dst, err: copyConnWithIdle(dst, src, *bufPtr, deadlines)}
 	}
 	go copyConn(left, right)
 	go copyConn(right, left)
-	err := <-errCh
+
+	var firstErr error
+	for i := 0; i < 2; i++ {
+		result := <-errCh
+		if firstErr == nil && result.err != nil && !isExpectedProxyClose(result.err) {
+			firstErr = result.err
+		}
+		halfCloseWrite(result.dst)
+	}
 	_ = left.Close()
 	_ = right.Close()
-	<-errCh
-	return err
+	return firstErr
 }
 
 func tuneConn(conn net.Conn) {
@@ -257,4 +293,94 @@ func tuneConn(conn net.Conn) {
 
 func (target socksTarget) String() string {
 	return net.JoinHostPort(target.host, strconv.Itoa(int(target.port)))
+}
+
+func isTemporaryAcceptError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "too many open files") || strings.Contains(text, "temporary")
+}
+
+type proxyDeadlines struct {
+	conns []net.Conn
+	idle  time.Duration
+}
+
+func newProxyDeadlines(left, right net.Conn, idle time.Duration) proxyDeadlines {
+	return proxyDeadlines{conns: []net.Conn{left, right}, idle: idle}
+}
+
+func (d proxyDeadlines) touchRead() {
+	if d.idle <= 0 {
+		return
+	}
+	deadline := time.Now().Add(d.idle)
+	for _, conn := range d.conns {
+		_ = conn.SetReadDeadline(deadline)
+	}
+}
+
+func (d proxyDeadlines) touchWrite(conn net.Conn) {
+	if d.idle <= 0 {
+		return
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(d.idle))
+}
+
+func copyConnWithIdle(dst, src net.Conn, buf []byte, deadlines proxyDeadlines) error {
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			deadlines.touchRead()
+			if err := writeAllWithIdle(dst, buf[:n], deadlines); err != nil {
+				return err
+			}
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+func writeAllWithIdle(dst net.Conn, data []byte, deadlines proxyDeadlines) error {
+	for len(data) > 0 {
+		deadlines.touchWrite(dst)
+		n, err := dst.Write(data)
+		if n > 0 {
+			data = data[n:]
+			deadlines.touchRead()
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func halfCloseWrite(conn net.Conn) {
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if cw, ok := conn.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+}
+
+func isExpectedProxyClose(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	return false
 }

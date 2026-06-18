@@ -22,6 +22,14 @@ app.
 Architecture and threat-model notes live in [ARCHITECTURE.md](ARCHITECTURE.md)
 and [THREAT_MODEL.md](THREAT_MODEL.md).
 
+## Troubleshooting
+
+The canonical end-to-end troubleshooting guide lives in the orchestrator
+repository: <https://github.com/TrafficWrapper/orchestrator/blob/master/TROUBLESHOOTING.md>.
+For worker-specific failures, start with enrollment values
+`ORCH_URL`, `ORCH_STATIC_PUBLIC_KEY`, `ENROLL_TOKEN`, `ORCH_INSECURE_TLS`, and
+`CAMOUFLAGE_DOMAIN`.
+
 ## What Is Included
 
 - `agent/` — pulls signed bundles from the orchestrator and applies state.

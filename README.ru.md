@@ -22,6 +22,15 @@ TrafficWrapper разделён на три репозитория:
 Архитектура и threat model описаны в [ARCHITECTURE.md](ARCHITECTURE.md) и
 [THREAT_MODEL.md](THREAT_MODEL.md).
 
+## Troubleshooting
+
+Канонический end-to-end troubleshooting guide находится в репозитории
+orchestrator:
+<https://github.com/TrafficWrapper/orchestrator/blob/master/TROUBLESHOOTING.ru.md>.
+Для worker-specific failures начинайте с enrollment values `ORCH_URL`,
+`ORCH_STATIC_PUBLIC_KEY`, `ENROLL_TOKEN`, `ORCH_INSECURE_TLS` и
+`CAMOUFLAGE_DOMAIN`.
+
 ## Что внутри
 
 - `agent/` — получает signed bundles от orchestrator и применяет state.

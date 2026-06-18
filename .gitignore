@@ -20,6 +20,8 @@ worker-state/
 .kotlin/
 .go-cache/
 .artifacts/
+/awg-gw/awg-gw
+/awg-smoke/awg-smoke
 client/app/build/
 client/app/libs/*.aar
 client/app/libs/*.jar

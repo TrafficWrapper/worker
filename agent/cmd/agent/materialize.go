@@ -70,6 +70,23 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 	if err != nil {
 		return fmt.Errorf("render xray config: %w", err)
 	}
+	if err := applyXrayConfigWithRestart(cfg, xrayRaw, len(devices), xrayRestartDebounce); err != nil {
+		return err
+	}
+	desiredPeers, err := writeAWGPeerRegistry(cfg, st, devices)
+	if err != nil {
+		return fmt.Errorf("write awg peer registry: %w", err)
+	}
+	if cfg.AWGUAPISocket != "" {
+		if err := syncAWGUAPI(cfg.AWGUAPISocket, desiredPeers); err != nil {
+			return fmt.Errorf("sync awg uapi: %w", err)
+		}
+		log.Printf("awg materialized peers=%d via %s", len(desiredPeers), cfg.AWGUAPISocket)
+	}
+	return nil
+}
+
+func applyXrayConfigWithRestart(cfg envConfig, xrayRaw []byte, approvedDeviceCount int, debounce time.Duration) error {
 	xrayChanged := xrayConfigChanged(cfg, xrayRaw)
 	xrayNeedsRestart := xrayChanged || xrayRestartPending(cfg)
 	if xrayNeedsRestart && cfg.XrayContainer == "" {
@@ -84,8 +101,10 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 		}
 	}
 	if xrayNeedsRestart {
-		log.Printf("xray restart pending; debouncing for %s", xrayRestartDebounce)
-		time.Sleep(xrayRestartDebounce)
+		if debounce > 0 {
+			log.Printf("xray restart pending; debouncing for %s", debounce)
+			time.Sleep(debounce)
+		}
 		log.Printf("xray config changed; restarting container %s via %s", cfg.XrayContainer, cfg.DockerSocket)
 		if err := restartDockerContainer(cfg.DockerSocket, cfg.XrayContainer); err != nil {
 			return fmt.Errorf("restart xray container %s: %w", cfg.XrayContainer, err)
@@ -93,17 +112,7 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 		if err := clearXrayRestartPending(cfg); err != nil {
 			return fmt.Errorf("clear xray restart pending: %w", err)
 		}
-		log.Printf("xray materialized approved_devices=%d and restarted %s", len(devices), cfg.XrayContainer)
-	}
-	desiredPeers, err := writeAWGPeerRegistry(cfg, st, devices)
-	if err != nil {
-		return fmt.Errorf("write awg peer registry: %w", err)
-	}
-	if cfg.AWGUAPISocket != "" {
-		if err := syncAWGUAPI(cfg.AWGUAPISocket, desiredPeers); err != nil {
-			return fmt.Errorf("sync awg uapi: %w", err)
-		}
-		log.Printf("awg materialized peers=%d via %s", len(desiredPeers), cfg.AWGUAPISocket)
+		log.Printf("xray materialized approved_devices=%d and restarted %s", approvedDeviceCount, cfg.XrayContainer)
 	}
 	return nil
 }

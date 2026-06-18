@@ -112,6 +112,49 @@ func TestMaterializeDoesNotWriteXrayConfigWithoutRestartTarget(t *testing.T) {
 	}
 }
 
+func TestRenderXrayMarksPendingWhenStartupRestartFails(t *testing.T) {
+	cfg := envConfig{
+		StateDir:         t.TempDir(),
+		RealityDest:      "awg-gw:9443",
+		CamouflageDomain: "example.com",
+		XrayContainer:    "worker-xray-1",
+		DockerSocket:     filepath.Join(t.TempDir(), "docker.sock"),
+	}
+	st := stateFile{
+		SmokeRealityUUID: "14526b0e-6de3-4407-bf8f-d8c688160ce6",
+		Reality:          realityState{PrivateKey: "priv", ShortID: "abcd", PublicKey: "pub"},
+		AWG: awgState{
+			SmokePublic:   keyB64(1),
+			SmokePSK:      keyB64(2),
+			SmokeIP:       "10.13.13.2/32",
+			PublicKey:     keyB64(3),
+			PrivateKey:    keyB64(4),
+			PrivateKeyHex: strings.Repeat("0", 64),
+		},
+	}
+	config := `{"desired_state":{"approved_devices":[{"device_id":"device-a","reality_uuid":"4fad2182-6de3-4407-bf8f-d8c688160ce6","awg_public_key":"` + keyB64(5) + `","internal_ip":"10.13.13.10/32","psk2":"` + keyB64(6) + `","status":"approved"}]}}`
+	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "orch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, "orch", "worker-config.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := renderXray(cfg, st)
+	if err == nil || !strings.Contains(err.Error(), "restart xray container") {
+		t.Fatalf("expected startup restart error, got %v", err)
+	}
+	if !xrayRestartPending(cfg) {
+		t.Fatal("startup restart failure did not leave pending marker")
+	}
+	xrayRaw, err := os.ReadFile(xrayConfigPath(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(xrayRaw), "4fad2182-6de3-4407-bf8f-d8c688160ce6") {
+		t.Fatalf("startup xray config missing approved device: %s", xrayRaw)
+	}
+}
+
 func TestSelfDescribeExposesClientRouteParameters(t *testing.T) {
 	cfg := envConfig{
 		PublicAddress:    "worker.example",

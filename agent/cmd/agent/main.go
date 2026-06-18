@@ -434,18 +434,17 @@ func renderAll(cfg envConfig, st stateFile) error {
 
 func renderXray(cfg envConfig, st stateFile) error {
 	devices := cachedApprovedDevices(cfg.StateDir)
-	_, err := writeXrayConfig(cfg, st, devices)
+	xrayRaw, err := xrayConfigBytes(cfg, st, devices)
 	if err != nil {
 		return err
 	}
-	if len(devices) > 0 && cfg.XrayContainer != "" {
-		if err := restartDockerContainer(cfg.DockerSocket, cfg.XrayContainer); err != nil {
-			log.Printf("startup xray restart skipped: %v", err)
-		} else {
-			log.Printf("startup xray config restored approved_devices=%d and restarted %s", len(devices), cfg.XrayContainer)
+	if len(devices) == 0 && !xrayRestartPending(cfg) {
+		if !xrayConfigChanged(cfg, xrayRaw) {
+			return nil
 		}
+		return writeXrayConfigBytes(cfg, xrayRaw)
 	}
-	return nil
+	return applyXrayConfigWithRestart(cfg, xrayRaw, len(devices), 0)
 }
 
 func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) map[string]any {

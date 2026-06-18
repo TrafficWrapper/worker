@@ -1,5 +1,7 @@
 # TrafficWrapper Worker
 
+[![CI](https://github.com/TrafficWrapper/worker/actions/workflows/ci.yml/badge.svg)](https://github.com/TrafficWrapper/worker/actions/workflows/ci.yml)
+
 [Русский](README.ru.md)
 
 Data-plane node for the TrafficWrapper platform. A worker enrolls into an
@@ -16,6 +18,9 @@ TrafficWrapper is split into three repositories:
 The normal workflow is: start the orchestrator, create a worker enrollment token,
 start this worker, approve it in the admin UI, then bootstrap devices with the
 app.
+
+Architecture and threat-model notes live in [ARCHITECTURE.md](ARCHITECTURE.md)
+and [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## What Is Included
 
@@ -61,8 +66,8 @@ Edit `.env`:
 - `ORCH_STATIC_PUBLIC_KEY`: output of `orchestrator public-key`.
 - `ENROLL_TOKEN`: one-time worker token from the orchestrator admin UI.
 - `PUBLIC_ADDRESS`: public DNS name or IP of this worker.
-- `CAMOUFLAGE_DOMAIN`: a real TLS 1.3 SNI/fallback domain for REALITY, not
-  `example.com`.
+- `CAMOUFLAGE_DOMAIN`: a real TLS 1.3 SNI/fallback domain for REALITY. Empty
+  values and `example.com`/`example.org` are refused.
 - `WAN_IF`: egress interface if you enable nft NAT automation.
 - `APPLY_NFT=1`: only after reviewing the generated NAT/firewall rules.
 
@@ -87,6 +92,12 @@ TCP/UDP ports manually, and running `docker compose up -d --build` is enough.
 - detect the WAN interface and public egress;
 - write `.env` values;
 - when `APPLY_NFT=1`, install nft accept/NAT rules for the selected ports.
+
+Run it with a real camouflage value, for example:
+
+```sh
+CAMOUFLAGE_DOMAIN=www.your-real-tls13-domain.tld ./install.sh
+```
 
 Keep `APPLY_NFT=0` until you review the generated firewall/NAT changes.
 
@@ -114,7 +125,7 @@ binaries:
 | `DOCKER_SOCKET` | Docker socket path used by the agent. | Optional | `/var/run/docker.sock` | Compose mounts the host Docker socket. |
 | `DISTRIBUTOR_URL` | Internal URL of the `/tw/` distributor. | Optional | `http://awg-gw:8080/tw` | Keep default for Compose. |
 | `WORKER_AGENT_URL` | Public/internal URL override for agent self-reference. | Optional | empty | Set only for custom deployments. |
-| `CAMOUFLAGE_DOMAIN` | REALITY serverName/camouflage SNI and fallback identity. | Required for REALITY | `example.com` placeholder | Use a real TLS 1.3 domain such as `www.example.org` that fits your deployment; do not leave `example.com` in production. |
+| `CAMOUFLAGE_DOMAIN` | REALITY serverName/camouflage SNI and fallback identity. | Required for REALITY | empty, refused until set | Use a real TLS 1.3 domain that fits your deployment; `example.com` and `example.org` are rejected. |
 | `REALITY_DEST` | REALITY fallback destination. | Optional | `awg-gw:9443` | Keep default for self-steal, or set `host:443`. |
 | `WORKER_STATE_DIR` | Worker state directory inside containers. | Optional | `/var/lib/trafficwrapper-worker` in binaries; Compose uses `/worker-state` | Keep Compose default unless running binaries manually. |
 | `TW_WORKER_DIALECT_JSON` | Advanced override for the AmneziaWG dialect JSON. | Optional | generated dialect | Use only for controlled testing. |

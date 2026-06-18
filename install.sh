@@ -71,16 +71,18 @@ write_env() {
   subnet=${AWG_SUBNET:-10.13.13.0/24}
   gateway=${AWG_GATEWAY:-$(first_host "$subnet")}
   egress=$(detect_ip)
-  python3 - "$xr" "$awg" "$subnet" "$gateway" "$egress" <<'PY'
+  camouflage=${CAMOUFLAGE_DOMAIN:-}
+  python3 - "$xr" "$awg" "$subnet" "$gateway" "$egress" "$camouflage" <<'PY'
 import sys
 path=".env"
-xr, awg, subnet, gateway, egress = sys.argv[1:]
+xr, awg, subnet, gateway, egress, camouflage = sys.argv[1:]
 repl={
  "XRAY_PORT": xr,
  "AWG_PORT": awg,
  "AWG_SUBNET": subnet,
  "AWG_GATEWAY": gateway,
  "EGRESS_IP": egress,
+ "CAMOUFLAGE_DOMAIN": camouflage,
 }
 lines=[]
 for line in open(path):
@@ -94,8 +96,14 @@ PY
 }
 
 verify_dest_hint() {
-  domain=$(awk -F= '$1=="CAMOUFLAGE_DOMAIN"{print $2}' .env)
+  domain=$(awk -F= '$1=="CAMOUFLAGE_DOMAIN"{print $2}' .env | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
   dest=$(awk -F= '$1=="REALITY_DEST"{print $2}' .env)
+  case "$domain" in
+    ""|example.com|example.org)
+      echo "error: refusing placeholder CAMOUFLAGE_DOMAIN; set a real TLS1.3 domain" >&2
+      exit 1
+      ;;
+  esac
   case "$dest" in
     *:443)
       host=${dest%:*}

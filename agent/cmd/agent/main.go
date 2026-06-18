@@ -251,7 +251,7 @@ func readEnv() (envConfig, error) {
 		OrchStaticPublic: os.Getenv("ORCH_STATIC_PUBLIC_KEY"),
 		OrchInsecureTLS:  getenv("ORCH_INSECURE_TLS", "0") == "1",
 		WorkerAgentURL:   os.Getenv("WORKER_AGENT_URL"),
-		CamouflageDomain: getenv("CAMOUFLAGE_DOMAIN", "example.com"),
+		CamouflageDomain: os.Getenv("CAMOUFLAGE_DOMAIN"),
 		RealityDest:      getenv("REALITY_DEST", fmt.Sprintf("awg-gw:%d", distributorTLS)),
 		EgressIP:         os.Getenv("EGRESS_IP"),
 		PublicAddress:    os.Getenv("PUBLIC_ADDRESS"),
@@ -268,7 +268,19 @@ func readEnv() (envConfig, error) {
 	if cfg.PublicAddress == "" {
 		cfg.PublicAddress = cfg.EgressIP
 	}
+	if err := validateCamouflageDomain(cfg.CamouflageDomain); err != nil {
+		return envConfig{}, err
+	}
 	return cfg, nil
+}
+
+func validateCamouflageDomain(domain string) error {
+	switch strings.ToLower(strings.TrimSpace(domain)) {
+	case "", "example.com", "example.org":
+		return errors.New("refusing placeholder CAMOUFLAGE_DOMAIN; set a real TLS1.3 domain")
+	default:
+		return nil
+	}
 }
 
 func bootstrap(cfg envConfig) (stateFile, error) {

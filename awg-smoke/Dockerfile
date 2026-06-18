@@ -1,4 +1,4 @@
-FROM golang:1.23.12-bookworm AS build
+FROM golang:1.24-bookworm AS build
 WORKDIR /src
 COPY core/go.mod core/go.sum ./core/
 COPY awg-smoke/go.mod ./awg-smoke/

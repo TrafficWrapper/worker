@@ -1,12 +1,10 @@
 module github.com/TrafficWrapper/worker/awg-smoke
 
-go 1.23.6
-
-toolchain go1.23.12
+go 1.24
 
 require (
-	github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250210181458-c97b5b76158f
 	github.com/TrafficWrapper/worker/core v0.0.0
+	github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250623202557-6a7c878409f3
 )
 
 require (

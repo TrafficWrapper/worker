@@ -1,21 +1,19 @@
 module github.com/TrafficWrapper/worker/core
 
-go 1.23.6
-
-toolchain go1.23.12
+go 1.24
 
 require (
-	github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250210181458-c97b5b76158f // pinned commit c97b5b76158fd85b1d461c9937ba5ff9186912d9
+	github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250623202557-6a7c878409f3 // pinned commit 6a7c878409f32dc39a82bc597766c81304ab9840
 	golang.org/x/crypto v0.38.0
 	golang.org/x/net v0.40.0
 	golang.org/x/sys v0.33.0
-	gvisor.dev/gvisor v0.0.0-20250210225643-b6c879e0ba3f // indirect
 )
 
 require (
 	aead.dev/minisign v0.3.0
 	github.com/flynn/noise v1.1.0
 	golang.org/x/mobile v0.0.0-20250520180527-a1d90793fc63
+	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 )
 
 require (

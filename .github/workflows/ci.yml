@@ -15,15 +15,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - module: agent
-            go-version: "1.23.x"
-          - module: awg-gw
-            go-version: "1.24.x"
-          - module: awg-smoke
-            go-version: "1.24.x"
-          - module: core
-            go-version: "1.24.x"
+        module:
+          - agent
+          - awg-gw
+          - awg-smoke
+          - core
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -31,7 +27,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version: "1.24.x"
 
       - name: Build
         working-directory: ${{ matrix.module }}

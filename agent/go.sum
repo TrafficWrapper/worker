@@ -1,7 +1,7 @@
 aead.dev/minisign v0.3.0 h1:8Xafzy5PEVZqYDNP60yJHARlW1eOQtsKNp/Ph2c0vRA=
 aead.dev/minisign v0.3.0/go.mod h1:NLvG3Uoq3skkRMDuc3YHpWUTMTrSExqm+Ij73W13F6Y=
-github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250210181458-c97b5b76158f h1:Mk6D4uhlyYfC+yc0GDJPqlSHAcoFkiRj4tiUhuK7UFU=
-github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250210181458-c97b5b76158f/go.mod h1:PJGulzxr+xeOhiiTLySJT7JCeuqXW/G6AIFW6X+9+1o=
+github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250623202557-6a7c878409f3 h1:gBsQFkxAPaJNOp7DgMTRvP75/uUvudXSGHPtw/Lg5jc=
+github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250623202557-6a7c878409f3/go.mod h1:5YeN1zLDj++iMpmXsxSTS06GrVMdqQyQx+Y/XvfTq3w=
 github.com/flynn/noise v1.1.0 h1:KjPQoQCEFdZDiP03phOvGi11+SVVhBG2wOWAorLsstg=
 github.com/flynn/noise v1.1.0/go.mod h1:xbMo+0i6+IGbYdJhF31t2eR1BIU0CYc12+BNAKwUTag=
 github.com/kr/pretty v0.2.1 h1:Fmg33tUaq4/8ym9TJN1x7sLJnHVwhP33CNkpYV/7rwI=

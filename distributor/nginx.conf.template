@@ -1,0 +1,41 @@
+server {
+    listen 9443 ssl http2;
+    server_name _;
+
+    ssl_certificate /worker-state/distributor/certs/tls.crt;
+    ssl_certificate_key /worker-state/distributor/certs/tls.key;
+    ssl_protocols TLSv1.3;
+
+    location /tw/ {
+        return 404;
+    }
+
+    location / {
+        default_type text/html;
+        return 200 '<!doctype html><html><head><title>TrafficWrapper</title></head><body><h1>OK</h1></body></html>';
+    }
+}
+
+server {
+    listen 0.0.0.0:8080;
+    server_name _;
+    client_max_body_size 128k;
+
+    location = /tw/telemetry {
+        proxy_pass http://agent:9090/orchestrator/telemetry;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-TW-Device $http_x_tw_device;
+        proxy_set_header X-TW-Pub $http_x_tw_pub;
+        proxy_set_header X-TW-KeyType $http_x_tw_keytype;
+        proxy_set_header X-TW-Ts $http_x_tw_ts;
+        proxy_set_header X-TW-Nonce $http_x_tw_nonce;
+        proxy_set_header X-TW-Sig $http_x_tw_sig;
+    }
+
+    location /tw/ {
+        alias /worker-state/distributor/tw/;
+        autoindex off;
+    }
+}

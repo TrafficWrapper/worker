@@ -1,5 +1,7 @@
 # Worker Threat Model
 
+[Русский](THREAT_MODEL.ru.md)
+
 Canonical platform threat model:
 <https://github.com/TrafficWrapper/orchestrator/blob/master/THREAT_MODEL.md>.
 

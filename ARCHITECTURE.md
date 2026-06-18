@@ -1,5 +1,7 @@
 # Worker Architecture
 
+[Русский](ARCHITECTURE.ru.md)
+
 Canonical platform architecture lives in the orchestrator repository:
 <https://github.com/TrafficWrapper/orchestrator/blob/master/ARCHITECTURE.md>.
 

@@ -5,7 +5,7 @@
 [Русский](README.ru.md)
 
 Data-plane node for TrafficWrapper, an open-source self-hosted private transport
-platform for small operator deployments and anti-censorship transport research.
+platform for small operator deployments and transport-obfuscation research.
 A worker enrolls into an orchestrator, materializes approved devices as Xray
 REALITY clients and AmneziaWG peers, and exposes the in-tunnel `/tw/`
 distributor for client config, APK updates, and opt-in telemetry.

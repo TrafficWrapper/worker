@@ -5,8 +5,8 @@
 [English](README.md)
 
 Data-plane узел TrafficWrapper — open-source self-hosted платформы private
-transport для небольших operator deployments и anti-censorship transport
-research. Worker enroll'ится в orchestrator, материализует approved devices как
+transport для небольших operator deployments и transport-obfuscation research.
+Worker enroll'ится в orchestrator, материализует approved devices как
 Xray REALITY clients и AmneziaWG peers, а также отдаёт in-tunnel `/tw/`
 distributor для client-config, APK updates и opt-in telemetry.
 

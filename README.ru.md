@@ -4,10 +4,15 @@
 
 [English](README.md)
 
-Data-plane узел платформы TrafficWrapper. Worker enroll'ится в orchestrator,
-материализует approved devices как Xray REALITY clients и AmneziaWG peers, а
-также отдаёт in-tunnel `/tw/` distributor для client-config, APK updates и
-opt-in telemetry.
+Data-plane узел TrafficWrapper — open-source self-hosted платформы private
+transport для небольших operator deployments и anti-censorship transport
+research. Worker enroll'ится в orchestrator, материализует approved devices как
+Xray REALITY clients и AmneziaWG peers, а также отдаёт in-tunnel `/tw/`
+distributor для client-config, APK updates и opt-in telemetry.
+
+Оператор владеет worker host, camouflage domain, dialect, enroll token и
+generated per-device material. Этот repository — infrastructure code; он не
+содержит deployment domains, IP addresses, private keys или state.
 
 TrafficWrapper разделён на три репозитория:
 

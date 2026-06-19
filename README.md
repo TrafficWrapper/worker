@@ -4,10 +4,15 @@
 
 [Русский](README.ru.md)
 
-Data-plane node for the TrafficWrapper platform. A worker enrolls into an
-orchestrator, materializes approved devices as Xray REALITY clients and
-AmneziaWG peers, and exposes the in-tunnel `/tw/` distributor for client config,
-APK updates, and opt-in telemetry.
+Data-plane node for TrafficWrapper, an open-source self-hosted private transport
+platform for small operator deployments and anti-censorship transport research.
+A worker enrolls into an orchestrator, materializes approved devices as Xray
+REALITY clients and AmneziaWG peers, and exposes the in-tunnel `/tw/`
+distributor for client config, APK updates, and opt-in telemetry.
+
+The operator owns the worker host, camouflage domain, dialect, enroll token,
+and generated per-device material. This repository is infrastructure code; it
+does not contain deployment domains, IP addresses, private keys, or state.
 
 TrafficWrapper is split into three repositories:
 

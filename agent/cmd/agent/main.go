@@ -638,7 +638,7 @@ func orchAppliedSeq(stateDir string) int64 {
 }
 
 func selfDescribe(cfg envConfig, st stateFile) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"schema":          "trafficwrapper-worker-p0",
 		"hostname":        st.Hostname,
 		"egress_ip":       cfg.EgressIP,
@@ -685,6 +685,74 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 			"nudge_ack_ready": true,
 			"max_seen_seq":    0,
 		},
+	}
+	if apk := distributedAPKInfo(cfg.StateDir); len(apk) > 0 {
+		out["distributed_apk"] = apk
+	}
+	return out
+}
+
+func distributedAPKInfo(stateDir string) map[string]any {
+	twDir := filepath.Join(stateDir, "distributor", "tw")
+	for _, path := range []string{
+		filepath.Join(twDir, "version.json"),
+		filepath.Join(twDir, "update-manifest.json"),
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil || len(strings.TrimSpace(string(raw))) == 0 {
+			continue
+		}
+		var root map[string]any
+		if err := json.Unmarshal(raw, &root); err != nil {
+			continue
+		}
+		if nested, ok := root["distributed_apk"].(map[string]any); ok {
+			root = nested
+		}
+		apk := map[string]any{}
+		if v := stringFromAny(root["apk_sha256"]); v != "" {
+			apk["apk_sha256"] = strings.ToLower(v)
+		}
+		if v := int64FromAny(root["version_code"]); v > 0 {
+			apk["version_code"] = v
+		}
+		if v := stringFromAny(root["version_name"]); v != "" {
+			apk["version_name"] = v
+		}
+		if v := stringFromAny(root["apk_name"]); v != "" {
+			apk["apk_name"] = filepath.Base(v)
+		}
+		if len(apk) > 0 {
+			return apk
+		}
+	}
+	return nil
+}
+
+func stringFromAny(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	default:
+		return ""
+	}
+}
+
+func int64FromAny(value any) int64 {
+	switch v := value.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case json.Number:
+		out, _ := v.Int64()
+		return out
+	default:
+		return 0
 	}
 }
 

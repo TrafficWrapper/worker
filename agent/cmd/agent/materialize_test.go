@@ -156,7 +156,16 @@ func TestRenderXrayMarksPendingWhenStartupRestartFails(t *testing.T) {
 }
 
 func TestSelfDescribeExposesClientRouteParameters(t *testing.T) {
+	stateDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(stateDir, "distributor", "tw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"schema":1,"ns":"apk-update-v1","version_code":11,"version_name":"0.1.10","apk_sha256":"` + strings.Repeat("a", 64) + `","apk_name":"TrafficWrapper-app-v0.1.10.apk"}`
+	if err := os.WriteFile(filepath.Join(stateDir, "distributor", "tw", "update-manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg := envConfig{
+		StateDir:         stateDir,
 		PublicAddress:    "worker.example",
 		XrayPort:         2053,
 		AWGPort:          51888,
@@ -194,6 +203,10 @@ func TestSelfDescribeExposesClientRouteParameters(t *testing.T) {
 	}
 	if awg["address"] != "worker.example" || awg["dialect_id"] != "dialect-id" {
 		t.Fatalf("awg address/dialect missing: %#v", awg)
+	}
+	apk := self["distributed_apk"].(map[string]any)
+	if apk["version_code"] != int64(11) || apk["apk_sha256"] != strings.Repeat("a", 64) {
+		t.Fatalf("distributed apk missing: %#v", apk)
 	}
 }
 

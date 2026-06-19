@@ -380,6 +380,12 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 		return 0, err
 	}
 	version := map[string]any{"version": fmt.Sprintf("orch-v%d", seq), "config_seq": seq, "created_at": time.Now().UTC().Format(time.RFC3339)}
+	if apk := distributedAPKInfo(cfg.StateDir); len(apk) > 0 {
+		version["distributed_apk"] = apk
+		for key, value := range apk {
+			version[key] = value
+		}
+	}
 	if err := writeJSONFile(filepath.Join(cfg.StateDir, "distributor", "tw", "version.json"), version, 0o644); err != nil {
 		return 0, err
 	}

@@ -695,8 +695,8 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 func distributedAPKInfo(stateDir string) map[string]any {
 	twDir := filepath.Join(stateDir, "distributor", "tw")
 	for _, path := range []string{
-		filepath.Join(twDir, "version.json"),
 		filepath.Join(twDir, "update-manifest.json"),
+		filepath.Join(twDir, "version.json"),
 	} {
 		raw, err := os.ReadFile(path)
 		if err != nil || len(strings.TrimSpace(string(raw))) == 0 {

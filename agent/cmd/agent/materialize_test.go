@@ -210,6 +210,38 @@ func TestSelfDescribeExposesClientRouteParameters(t *testing.T) {
 	}
 }
 
+func TestDistributedAPKInfoPrefersUpdateManifestOverStaleVersion(t *testing.T) {
+	stateDir := t.TempDir()
+	twDir := filepath.Join(stateDir, "distributor", "tw")
+	if err := os.MkdirAll(twDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := map[string]any{
+		"distributed_apk": map[string]any{
+			"version_code": 12,
+			"version_name": "0.1.11",
+			"apk_sha256":   strings.Repeat("a", 64),
+			"apk_name":     "TrafficWrapper-app-v0.1.11.apk",
+		},
+	}
+	staleRaw, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(twDir, "version.json"), staleRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"schema":1,"ns":"apk-update-v1","seq":3,"version_code":13,"version_name":"0.1.12","apk_sha256":"` + strings.Repeat("b", 64) + `","apk_name":"TrafficWrapper-app-v0.1.12.apk"}`
+	if err := os.WriteFile(filepath.Join(twDir, "update-manifest.json"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	apk := distributedAPKInfo(stateDir)
+	if apk["version_code"] != int64(13) || apk["version_name"] != "0.1.12" || apk["apk_sha256"] != strings.Repeat("b", 64) {
+		t.Fatalf("distributed apk should come from update-manifest.json, got %#v", apk)
+	}
+}
+
 func TestDockerContainerNameCandidatesBridgeComposeV1V2(t *testing.T) {
 	got := dockerContainerNameCandidates("worker_xray_1")
 	want := []string{"worker_xray_1", "worker-xray-1"}

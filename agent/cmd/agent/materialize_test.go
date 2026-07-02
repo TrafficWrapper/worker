@@ -96,6 +96,57 @@ func TestAWGInboundProfilesDefaultAndJSON(t *testing.T) {
 	}
 }
 
+func TestAWGInboundProfilesRejectConflicts(t *testing.T) {
+	cfg := envConfig{
+		AWGPort:       51888,
+		AWGSubnet:     "10.13.13.0/24",
+		AWGGateway:    "10.13.13.1",
+		AWGUAPISocket: "/var/run/wireguard/awg1.sock",
+	}
+	valid := `[{"name":"awg","interface":"awg1","listen_port":51821,"subnet":"10.13.13.0/24"},{"name":"next","interface":"awg2","listen_port":52821,"subnet":"10.44.0.0/24"}]`
+	if profiles, err := parseAWGInboundProfiles(valid, cfg); err != nil || len(profiles) != 2 {
+		t.Fatalf("valid disjoint profiles rejected: profiles=%+v err=%v", profiles, err)
+	}
+	if profiles, err := parseAWGInboundProfiles("", cfg); err != nil || len(profiles) != 1 {
+		t.Fatalf("default profile rejected: profiles=%+v err=%v", profiles, err)
+	}
+
+	tests := []struct {
+		name      string
+		raw       string
+		wantError string
+	}{
+		{
+			name:      "shared interface",
+			raw:       `[{"name":"awg","interface":"awg1","listen_port":51821,"subnet":"10.13.13.0/24"},{"name":"next","interface":"awg1","listen_port":52821,"subnet":"10.44.0.0/24"}]`,
+			wantError: "share interface",
+		},
+		{
+			name:      "shared listen port",
+			raw:       `[{"name":"awg","interface":"awg1","listen_port":51821,"subnet":"10.13.13.0/24"},{"name":"next","interface":"awg2","listen_port":51821,"subnet":"10.44.0.0/24"}]`,
+			wantError: "share listen_port",
+		},
+		{
+			name:      "shared uapi socket",
+			raw:       `[{"name":"awg","interface":"awg1","listen_port":51821,"subnet":"10.13.13.0/24","uapi_socket":"/tmp/shared.sock"},{"name":"next","interface":"awg2","listen_port":52821,"subnet":"10.44.0.0/24","uapi_socket":"/tmp/shared.sock"}]`,
+			wantError: "share uapi_socket",
+		},
+		{
+			name:      "shared subnet",
+			raw:       `[{"name":"awg","interface":"awg1","listen_port":51821,"subnet":"10.13.13.0/24"},{"name":"next","interface":"awg2","listen_port":52821,"subnet":"10.13.13.0/24"}]`,
+			wantError: "share subnet",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseAWGInboundProfiles(tt.raw, cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("error=%v want containing %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestWriteAWGPeerRegistryForAdditionalProfile(t *testing.T) {
 	cfg := envConfig{StateDir: t.TempDir(), AWGPort: 51888, AWGSubnet: "10.13.13.0/24", AWGGateway: "10.13.13.1", AWGUAPISocket: "/tmp/awg1.sock"}
 	st := stateFile{AWG: awgState{SmokePublic: keyB64(1), SmokePSK: keyB64(2), SmokeIP: "10.13.13.2/32"}}

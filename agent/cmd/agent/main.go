@@ -315,6 +315,10 @@ func parseAWGInboundProfiles(raw string, cfg envConfig) ([]awgInboundProfile, er
 		return nil, errors.New("AWG_INBOUNDS must contain at least one profile")
 	}
 	seen := map[string]struct{}{}
+	seenInterfaces := map[string]string{}
+	seenListenPorts := map[int]string{}
+	seenUAPISockets := map[string]string{}
+	seenSubnets := map[string]string{}
 	hasBase := false
 	for i := range profiles {
 		if profiles[i].Name == "" && i == 0 {
@@ -347,9 +351,11 @@ func parseAWGInboundProfiles(raw string, cfg envConfig) ([]awgInboundProfile, er
 			return nil, fmt.Errorf("AWG_INBOUNDS[%d].public_port must be in 1..65535", i)
 		}
 		profiles[i].Subnet = strings.TrimSpace(profiles[i].Subnet)
-		if _, err := netip.ParsePrefix(profiles[i].Subnet); err != nil {
+		prefix, err := netip.ParsePrefix(profiles[i].Subnet)
+		if err != nil {
 			return nil, fmt.Errorf("AWG_INBOUNDS[%d].subnet: %w", i, err)
 		}
+		profiles[i].Subnet = prefix.Masked().String()
 		if profiles[i].Gateway == "" {
 			gateway, err := firstHost(profiles[i].Subnet)
 			if err != nil {
@@ -361,11 +367,33 @@ func parseAWGInboundProfiles(raw string, cfg envConfig) ([]awgInboundProfile, er
 		if profiles[i].UAPISocket == "" {
 			profiles[i].UAPISocket = filepath.Join("/var/run/wireguard", profiles[i].Interface+".sock")
 		}
+		profiles[i].UAPISocket = filepath.Clean(strings.TrimSpace(profiles[i].UAPISocket))
+		if err := rejectAWGProfileConflict(seenInterfaces, profiles[i].Interface, profiles[i].Name, "interface"); err != nil {
+			return nil, err
+		}
+		if owner, ok := seenListenPorts[profiles[i].ListenPort]; ok {
+			return nil, fmt.Errorf("AWG_INBOUNDS profiles %q and %q share listen_port %d", owner, profiles[i].Name, profiles[i].ListenPort)
+		}
+		seenListenPorts[profiles[i].ListenPort] = profiles[i].Name
+		if err := rejectAWGProfileConflict(seenUAPISockets, profiles[i].UAPISocket, profiles[i].Name, "uapi_socket"); err != nil {
+			return nil, err
+		}
+		if err := rejectAWGProfileConflict(seenSubnets, profiles[i].Subnet, profiles[i].Name, "subnet"); err != nil {
+			return nil, err
+		}
 	}
 	if !hasBase {
 		return nil, errors.New("AWG_INBOUNDS must include base profile named awg")
 	}
 	return profiles, nil
+}
+
+func rejectAWGProfileConflict(seen map[string]string, value, profileName, field string) error {
+	if owner, ok := seen[value]; ok {
+		return fmt.Errorf("AWG_INBOUNDS profiles %q and %q share %s %q", owner, profileName, field, value)
+	}
+	seen[value] = profileName
+	return nil
 }
 
 func defaultAWGInboundProfile(cfg envConfig) awgInboundProfile {

@@ -86,11 +86,12 @@ type orchPullResponse struct {
 }
 
 type orchAckRequest struct {
-	WorkerID         string         `json:"worker_id"`
-	AppliedVersion   int64          `json:"applied_version"`
-	SelfCheck        string         `json:"self_check"`
-	EgressIPObserved string         `json:"egress_ip_observed"`
-	SelfDescribe     map[string]any `json:"self_describe,omitempty"`
+	WorkerID         string            `json:"worker_id"`
+	AppliedVersion   int64             `json:"applied_version"`
+	SelfCheck        string            `json:"self_check"`
+	EgressIPObserved string            `json:"egress_ip_observed"`
+	SelfDescribe     map[string]any    `json:"self_describe,omitempty"`
+	Usage            []orchUsageReport `json:"usage,omitempty"`
 }
 
 type orchNudgeRequest struct {
@@ -120,6 +121,14 @@ type orchAckResponse struct {
 	AppliedSeq    int64  `json:"applied_seq,omitempty"`
 	EgressIPProbe string `json:"egress_ip_probe,omitempty"`
 	EgressMatch   bool   `json:"egress_match"`
+	QuotaBlocks   int    `json:"quota_blocks,omitempty"`
+}
+
+type orchUsageReport struct {
+	DeviceID     string `json:"device_id,omitempty"`
+	AWGPublicKey string `json:"awg_public_key,omitempty"`
+	RxBytes      uint64 `json:"rx_bytes,omitempty"`
+	TxBytes      uint64 `json:"tx_bytes,omitempty"`
 }
 
 type orchSignedConfig struct {
@@ -193,6 +202,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile) {
 			} else if nudge.DesiredSeq <= state.AppliedSeq {
 				log.Printf("orch nudge heartbeat desired=%d applied=%d", nudge.DesiredSeq, state.AppliedSeq)
 			}
+			reportOrchAck(client, cfg, st, state.WorkerID, state.AppliedSeq)
 			continue
 		}
 		seq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)
@@ -203,14 +213,25 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile) {
 		}
 		state.AppliedSeq = seq
 		_ = saveOrchState(cfg.StateDir, state)
-		ack, err := client.ack(state.WorkerID, seq, cfg.EgressIP, selfDescribe(cfg, st))
-		if err != nil {
-			log.Printf("orch ack failed: %v", err)
-		} else {
-			log.Printf("orch ack ok applied=%d desired=%d egress_probe=%s match=%t", ack.AppliedSeq, ack.DesiredSeq, ack.EgressIPProbe, ack.EgressMatch)
-		}
+		reportOrchAck(client, cfg, st, state.WorkerID, seq)
 		sleepCtx(ctx, 5*time.Second)
 	}
+}
+
+func reportOrchAck(client *orchClient, cfg envConfig, st stateFile, workerID string, seq int64) {
+	usage, err := collectAWGUsageReports(cfg, cachedApprovedDevices(cfg.StateDir))
+	if err != nil {
+		log.Printf("awg usage report skipped: %v", err)
+	}
+	ack, err := client.ack(workerID, seq, cfg.EgressIP, selfDescribe(cfg, st), usage)
+	if err != nil {
+		log.Printf("orch ack failed: %v", err)
+		return
+	}
+	if ack.QuotaBlocks > 0 {
+		quotaBlocksTotal.Add(uint64(ack.QuotaBlocks))
+	}
+	log.Printf("orch ack ok applied=%d desired=%d egress_probe=%s match=%t", ack.AppliedSeq, ack.DesiredSeq, ack.EgressIPProbe, ack.EgressMatch)
 }
 
 type orchClient struct {
@@ -248,9 +269,9 @@ func (c *orchClient) pull(workerID string, have int64) (orchPullResponse, error)
 	return resp, err
 }
 
-func (c *orchClient) ack(workerID string, seq int64, egressIP string, self map[string]any) (orchAckResponse, error) {
+func (c *orchClient) ack(workerID string, seq int64, egressIP string, self map[string]any, usage []orchUsageReport) (orchAckResponse, error) {
 	var resp orchAckResponse
-	err := c.noiseCall("/w/v1/ack", orchAckRequest{WorkerID: workerID, AppliedVersion: seq, SelfCheck: "ok", EgressIPObserved: egressIP, SelfDescribe: self}, &resp)
+	err := c.noiseCall("/w/v1/ack", orchAckRequest{WorkerID: workerID, AppliedVersion: seq, SelfCheck: "ok", EgressIPObserved: egressIP, SelfDescribe: self, Usage: usage}, &resp)
 	return resp, err
 }
 

@@ -56,6 +56,7 @@ func TestMetricsHandlerExportsAWGPeerMetrics(t *testing.T) {
 	for _, want := range []string{
 		`tw_worker_awg_interface_up{interface="awg1"} 1`,
 		`tw_worker_awg_peer_count{interface="awg1"} 1`,
+		`tw_worker_quota_blocks_total{interface="awg1"} 0`,
 		`awg_peer_rx_bytes{interface="awg1",peer="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",allowed_ip="10.13.13.2/32",endpoint="198.51.100.10:54321"} 123`,
 		`awg_peer_tx_bytes{interface="awg1",peer="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",allowed_ip="10.13.13.2/32",endpoint="198.51.100.10:54321"} 456`,
 		`awg_peer_last_handshake_time_seconds{interface="awg1",peer="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",allowed_ip="10.13.13.2/32",endpoint="198.51.100.10:54321"} 1710000000`,

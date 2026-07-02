@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
+
+var quotaBlocksTotal atomic.Uint64
 
 func metricsHandler(cfg envConfig, startedAt time.Time) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
@@ -29,6 +32,7 @@ func writeAWGMetrics(w io.Writer, iface string, startedAt time.Time, peers []awg
 	_, _ = fmt.Fprintf(w, "tw_worker_awg_interface_up{interface=%q} 1\n", iface)
 	_, _ = fmt.Fprintf(w, "tw_worker_awg_peer_count{interface=%q} %d\n", iface, len(peers))
 	_, _ = fmt.Fprintf(w, "tw_worker_awg_metrics_uptime_seconds{interface=%q} %.0f\n", iface, time.Since(startedAt).Seconds())
+	_, _ = fmt.Fprintf(w, "tw_worker_quota_blocks_total{interface=%q} %d\n", iface, quotaBlocksTotal.Load())
 	for _, peer := range peers {
 		allowedIPs := append([]string(nil), peer.AllowedIPs...)
 		sort.Strings(allowedIPs)

@@ -219,19 +219,42 @@ func telemetryHandler(cfg envConfig, st stateFile) http.HandlerFunc {
 			http.Error(w, "worker is not enrolled", http.StatusServiceUnavailable)
 			return
 		}
-		client, err := newOrchClient(cfg, st)
+		client, err := newTelemetryClient(cfg, st)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
 		headers := telemetryHeadersFromRequest(r)
 		if err := client.telemetry(state.WorkerID, raw, headers); err != nil {
+			if isDeviceNotApprovedError(err) {
+				log.Printf("telemetry forward rejected: device is not approved")
+				writeDeviceNotApprovedResponse(w)
+				return
+			}
 			log.Printf("telemetry forward failed: %v", err)
 			http.Error(w, "telemetry forward failed", http.StatusBadGateway)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+type telemetryClient interface {
+	telemetry(workerID string, payload []byte, headers map[string]string) error
+}
+
+var newTelemetryClient = func(cfg envConfig, st stateFile) (telemetryClient, error) {
+	return newOrchClient(cfg, st)
+}
+
+func isDeviceNotApprovedError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "device is not approved")
+}
+
+func writeDeviceNotApprovedResponse(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":"device_not_approved"}`))
 }
 
 func telemetryHeadersFromRequest(r *http.Request) map[string]string {

@@ -76,6 +76,7 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 	if err != nil {
 		return err
 	}
+	devices = filterUnexpiredApprovedDevices(devices, time.Now().UTC())
 	xrayRaw, err := xrayConfigBytes(cfg, st, devices)
 	if err != nil {
 		return fmt.Errorf("render xray config: %w", err)
@@ -161,7 +162,20 @@ func cachedApprovedDevices(stateDir string) []approvedDevice {
 	return devices
 }
 
+func filterUnexpiredApprovedDevices(devices []approvedDevice, now time.Time) []approvedDevice {
+	out := make([]approvedDevice, 0, len(devices))
+	for _, device := range devices {
+		if expiresAt, ok := approvedDeviceExpiry(device); ok && !now.Before(expiresAt) {
+			log.Printf("approved device %s expired at %s; skipping materialization", device.DeviceID, expiresAt.Format(time.RFC3339))
+			continue
+		}
+		out = append(out, device)
+	}
+	return out
+}
+
 func writeAWGPeerRegistry(cfg envConfig, st stateFile, devices []approvedDevice) ([]awgDesiredPeer, error) {
+	now := time.Now().UTC()
 	expires := time.Now().UTC().Add(3650 * 24 * time.Hour)
 	clients := []awgPeerRegistryClient{{
 		WGPublicKey: st.AWG.SmokePublic,
@@ -181,6 +195,10 @@ func writeAWGPeerRegistry(cfg envConfig, st stateFile, devices []approvedDevice)
 		}
 		deviceExpires := expires
 		if parsed, ok := approvedDeviceExpiry(device); ok {
+			if !now.Before(parsed) {
+				log.Printf("approved device %s expired at %s; skipping AWG peer", device.DeviceID, parsed.Format(time.RFC3339))
+				continue
+			}
 			deviceExpires = parsed
 		}
 		seen[device.AWGPublicKey] = struct{}{}

@@ -448,7 +448,7 @@ func renderAll(cfg envConfig, st stateFile) error {
 }
 
 func renderXray(cfg envConfig, st stateFile) error {
-	devices := cachedApprovedDevices(cfg.StateDir)
+	devices := filterUnexpiredApprovedDevices(cachedApprovedDevices(cfg.StateDir), time.Now().UTC())
 	xrayRaw, err := xrayConfigBytes(cfg, st, devices)
 	if err != nil {
 		return err
@@ -584,7 +584,7 @@ func renderAWG(cfg envConfig, st stateFile) error {
 	if err := writeJSONFile(filepath.Join(cfg.StateDir, "awg", "awg-gw.json"), awgCfg, 0o600); err != nil {
 		return err
 	}
-	if _, err := writeAWGPeerRegistry(cfg, st, cachedApprovedDevices(cfg.StateDir)); err != nil {
+	if _, err := writeAWGPeerRegistry(cfg, st, filterUnexpiredApprovedDevices(cachedApprovedDevices(cfg.StateDir), time.Now().UTC())); err != nil {
 		return err
 	}
 	return writeFile(filepath.Join(cfg.StateDir, "smoke", "awg-peer.conf"), []byte(smokePeerConfig(cfg, st)), 0o600)

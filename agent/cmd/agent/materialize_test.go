@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TrafficWrapper/worker/core/awg/dialect"
 )
@@ -71,6 +72,46 @@ func TestApprovedDevicesRejectIncomplete(t *testing.T) {
 	_, err := approvedDevicesFromWorkerConfig(`{"desired_state":{"approved_devices":[{"device_id":"bad","status":"approved"}]}}`)
 	if err == nil {
 		t.Fatal("incomplete approved device accepted")
+	}
+}
+
+func TestExpiredApprovedDeviceSkippedFromMaterialization(t *testing.T) {
+	cfg := envConfig{StateDir: t.TempDir(), RealityDest: "awg-gw:9443", CamouflageDomain: "example.com"}
+	st := stateFile{
+		SmokeRealityUUID: "14526b0e-6de3-4407-bf8f-d8c688160ce6",
+		Reality:          realityState{PrivateKey: "priv", ShortID: "abcd", PublicKey: "pub"},
+		AWG: awgState{
+			SmokePublic: keyB64(1),
+			SmokePSK:    keyB64(2),
+			SmokeIP:     "10.13.13.2/32",
+		},
+	}
+	expired := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	devices := []approvedDevice{{
+		DeviceID:     "expired",
+		RealityUUID:  "4fad2182-6de3-4407-bf8f-d8c688160ce6",
+		AWGPublicKey: keyB64(5),
+		InternalIP:   "10.13.13.10/32",
+		PSK2:         keyB64(6),
+		Status:       "approved",
+		ExpiresAt:    expired,
+	}}
+	if got := filterUnexpiredApprovedDevices(devices, time.Now().UTC()); len(got) != 0 {
+		t.Fatalf("expired device was not filtered: %+v", got)
+	}
+	peers, err := writeAWGPeerRegistry(cfg, st, devices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].PublicKey != st.AWG.SmokePublic {
+		t.Fatalf("expired device leaked into desired peers: %+v", peers)
+	}
+	raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "awg", "peers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "10.13.13.10") {
+		t.Fatalf("expired device leaked into registry: %s", raw)
 	}
 }
 

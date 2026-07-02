@@ -80,6 +80,7 @@ type envConfig struct {
 	AWGSubnet        string
 	AWGGateway       string
 	AWGUAPISocket    string
+	AWGProfiles      []awgInboundProfile
 	XrayContainer    string
 	DockerSocket     string
 	OrchURL          string
@@ -97,6 +98,17 @@ type envConfig struct {
 	DistributorURL   string
 	EnrollToken      string
 	Capacity         int
+}
+
+type awgInboundProfile struct {
+	Name           string `json:"name"`
+	Interface      string `json:"interface"`
+	ListenPort     int    `json:"listen_port"`
+	PublicPort     int    `json:"public_port,omitempty"`
+	Subnet         string `json:"subnet"`
+	Gateway        string `json:"gateway,omitempty"`
+	UAPISocket     string `json:"uapi_socket,omitempty"`
+	MinVersionCode int    `json:"min_version_code,omitempty"`
 }
 
 func main() {
@@ -279,10 +291,148 @@ func readEnv() (envConfig, error) {
 	if cfg.PublicAddress == "" {
 		cfg.PublicAddress = cfg.EgressIP
 	}
+	profiles, err := parseAWGInboundProfiles(os.Getenv("AWG_INBOUNDS"), cfg)
+	if err != nil {
+		return envConfig{}, err
+	}
+	cfg.AWGProfiles = profiles
 	if err := validateCamouflageDomain(cfg.CamouflageDomain); err != nil {
 		return envConfig{}, err
 	}
 	return cfg, nil
+}
+
+func parseAWGInboundProfiles(raw string, cfg envConfig) ([]awgInboundProfile, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []awgInboundProfile{defaultAWGInboundProfile(cfg)}, nil
+	}
+	var profiles []awgInboundProfile
+	if err := json.Unmarshal([]byte(raw), &profiles); err != nil {
+		return nil, fmt.Errorf("parse AWG_INBOUNDS: %w", err)
+	}
+	if len(profiles) == 0 {
+		return nil, errors.New("AWG_INBOUNDS must contain at least one profile")
+	}
+	seen := map[string]struct{}{}
+	hasBase := false
+	for i := range profiles {
+		if profiles[i].Name == "" && i == 0 {
+			profiles[i].Name = "awg"
+		}
+		profiles[i].Name = normalizeAWGProfileName(profiles[i].Name)
+		if profiles[i].Name == "" {
+			return nil, fmt.Errorf("AWG_INBOUNDS[%d].name must be set", i)
+		}
+		if _, ok := seen[profiles[i].Name]; ok {
+			return nil, fmt.Errorf("AWG_INBOUNDS profile %q is duplicated", profiles[i].Name)
+		}
+		seen[profiles[i].Name] = struct{}{}
+		if profiles[i].Name == "awg" {
+			hasBase = true
+		}
+		if profiles[i].Interface = strings.TrimSpace(profiles[i].Interface); profiles[i].Interface == "" {
+			return nil, fmt.Errorf("AWG_INBOUNDS[%d].interface must be set", i)
+		}
+		if strings.ContainsAny(profiles[i].Interface, " \t\r\n/") || len(profiles[i].Interface) > 15 {
+			return nil, fmt.Errorf("AWG_INBOUNDS[%d].interface is invalid", i)
+		}
+		if profiles[i].ListenPort < 1025 || profiles[i].ListenPort > 65535 {
+			return nil, fmt.Errorf("AWG_INBOUNDS[%d].listen_port must be in 1025..65535", i)
+		}
+		if profiles[i].PublicPort == 0 {
+			profiles[i].PublicPort = profiles[i].ListenPort
+		}
+		if profiles[i].PublicPort < 1 || profiles[i].PublicPort > 65535 {
+			return nil, fmt.Errorf("AWG_INBOUNDS[%d].public_port must be in 1..65535", i)
+		}
+		profiles[i].Subnet = strings.TrimSpace(profiles[i].Subnet)
+		if _, err := netip.ParsePrefix(profiles[i].Subnet); err != nil {
+			return nil, fmt.Errorf("AWG_INBOUNDS[%d].subnet: %w", i, err)
+		}
+		if profiles[i].Gateway == "" {
+			gateway, err := firstHost(profiles[i].Subnet)
+			if err != nil {
+				return nil, fmt.Errorf("AWG_INBOUNDS[%d].subnet: %w", i, err)
+			}
+			profiles[i].Gateway = gateway
+		}
+		profiles[i].Gateway = strings.TrimSpace(profiles[i].Gateway)
+		if profiles[i].UAPISocket == "" {
+			profiles[i].UAPISocket = filepath.Join("/var/run/wireguard", profiles[i].Interface+".sock")
+		}
+	}
+	if !hasBase {
+		return nil, errors.New("AWG_INBOUNDS must include base profile named awg")
+	}
+	return profiles, nil
+}
+
+func defaultAWGInboundProfile(cfg envConfig) awgInboundProfile {
+	return awgInboundProfile{
+		Name:       "awg",
+		Interface:  "awg1",
+		ListenPort: awgInPort,
+		PublicPort: cfg.AWGPort,
+		Subnet:     cfg.AWGSubnet,
+		Gateway:    cfg.AWGGateway,
+		UAPISocket: cfg.AWGUAPISocket,
+	}
+}
+
+func awgProfiles(cfg envConfig) []awgInboundProfile {
+	if len(cfg.AWGProfiles) > 0 {
+		return cfg.AWGProfiles
+	}
+	return []awgInboundProfile{defaultAWGInboundProfile(cfg)}
+}
+
+func baseAWGProfile(cfg envConfig) awgInboundProfile {
+	for _, profile := range awgProfiles(cfg) {
+		if profile.isBase() {
+			return profile
+		}
+	}
+	return awgProfiles(cfg)[0]
+}
+
+func normalizeAWGProfileName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-':
+			b.WriteRune(r)
+		default:
+			return ""
+		}
+	}
+	return b.String()
+}
+
+func (p awgInboundProfile) isBase() bool {
+	return p.Name == "" || p.Name == "awg"
+}
+
+func (p awgInboundProfile) registryPath(stateDir string) string {
+	if p.isBase() {
+		return filepath.Join(stateDir, "awg", "peers.json")
+	}
+	return filepath.Join(stateDir, "awg", "profiles", p.Name, "peers.json")
+}
+
+func (p awgInboundProfile) configPath(stateDir string) string {
+	if p.isBase() {
+		return filepath.Join(stateDir, "awg", "awg-gw.json")
+	}
+	return filepath.Join(stateDir, "awg", "profiles", p.Name, "awg-gw.json")
 }
 
 func validateCamouflageDomain(domain string) error {
@@ -612,21 +762,24 @@ func clearXrayRestartPending(cfg envConfig) error {
 }
 
 func renderAWG(cfg envConfig, st stateFile) error {
-	addr := cfg.AWGGateway + "/" + prefixLen(cfg.AWGSubnet)
-	awgCfg := map[string]any{
-		"interface":       "awg1",
-		"address":         addr,
-		"listen_port":     awgInPort,
-		"private_key_hex": st.AWG.PrivateKeyHex,
-		"public_key":      st.AWG.PublicKey,
-		"dialect":         st.Dialect,
-		"peer_registry":   "/worker-state/awg/peers.json",
-	}
-	if err := writeJSONFile(filepath.Join(cfg.StateDir, "awg", "awg-gw.json"), awgCfg, 0o600); err != nil {
-		return err
-	}
-	if _, err := writeAWGPeerRegistry(cfg, st, filterUnexpiredApprovedDevices(cachedApprovedDevices(cfg.StateDir), time.Now().UTC())); err != nil {
-		return err
+	devices := filterUnexpiredApprovedDevices(cachedApprovedDevices(cfg.StateDir), time.Now().UTC())
+	for _, profile := range awgProfiles(cfg) {
+		addr := profile.Gateway + "/" + prefixLen(profile.Subnet)
+		awgCfg := map[string]any{
+			"interface":       profile.Interface,
+			"address":         addr,
+			"listen_port":     profile.ListenPort,
+			"private_key_hex": st.AWG.PrivateKeyHex,
+			"public_key":      st.AWG.PublicKey,
+			"dialect":         st.Dialect,
+			"peer_registry":   profile.registryPath(cfg.StateDir),
+		}
+		if err := writeJSONFile(profile.configPath(cfg.StateDir), awgCfg, 0o600); err != nil {
+			return err
+		}
+		if _, err := writeAWGPeerRegistryForProfile(cfg, st, devices, profile); err != nil {
+			return err
+		}
 	}
 	return writeFile(filepath.Join(cfg.StateDir, "smoke", "awg-peer.conf"), []byte(smokePeerConfig(cfg, st)), 0o600)
 }
@@ -699,6 +852,11 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 	if xhttp := xhttpSettings(cfg); xhttp != nil {
 		reality["xhttp"] = xhttp
 	}
+	awgProfilePayloads := make([]any, 0, len(awgProfiles(cfg)))
+	for _, profile := range awgProfiles(cfg) {
+		awgProfilePayloads = append(awgProfilePayloads, awgSelfDescribe(cfg, st, profile))
+	}
+	baseAWG := awgSelfDescribe(cfg, st, baseAWGProfile(cfg))
 	out := map[string]any{
 		"schema":          "trafficwrapper-worker-p0",
 		"hostname":        st.Hostname,
@@ -711,19 +869,8 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 		"capacity":        cfg.Capacity,
 		"protocols":       []string{"REALITY", "AWG"},
 		"reality":         reality,
-		"awg": map[string]any{
-			"address":           cfg.PublicAddress,
-			"endpoint":          net.JoinHostPort(cfg.PublicAddress, strconv.Itoa(cfg.AWGPort)),
-			"public_key":        st.AWG.PublicKey,
-			"server_public":     st.AWG.PublicKey,
-			"server_public_key": st.AWG.PublicKey,
-			"port":              cfg.AWGPort,
-			"subnet":            cfg.AWGSubnet,
-			"gateway":           cfg.AWGGateway,
-			"dialect":           st.Dialect,
-			"dialect_id":        st.DialectID,
-			"smoke_peer_config": "/worker-state/smoke/awg-peer.conf",
-		},
+		"awg":             baseAWG,
+		"awg_profiles":    awgProfilePayloads,
 		"orchestrator": map[string]any{
 			"noise_xk_ready":  true,
 			"pull_ready":      true,
@@ -735,6 +882,27 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 		out["distributed_apk"] = apk
 	}
 	return out
+}
+
+func awgSelfDescribe(cfg envConfig, st stateFile, profile awgInboundProfile) map[string]any {
+	return map[string]any{
+		"profile":           profile.Name,
+		"name":              profile.Name,
+		"address":           cfg.PublicAddress,
+		"endpoint":          net.JoinHostPort(cfg.PublicAddress, strconv.Itoa(profile.PublicPort)),
+		"public_key":        st.AWG.PublicKey,
+		"server_public":     st.AWG.PublicKey,
+		"server_public_key": st.AWG.PublicKey,
+		"port":              profile.PublicPort,
+		"listen_port":       profile.ListenPort,
+		"interface":         profile.Interface,
+		"subnet":            profile.Subnet,
+		"gateway":           profile.Gateway,
+		"min_version_code":  profile.MinVersionCode,
+		"dialect":           st.Dialect,
+		"dialect_id":        st.DialectID,
+		"smoke_peer_config": "/worker-state/smoke/awg-peer.conf",
+	}
 }
 
 func distributedAPKInfo(stateDir string) map[string]any {
@@ -934,6 +1102,7 @@ func selfSignedCert(name string) ([]byte, []byte, error) {
 }
 
 func smokePeerConfig(cfg envConfig, st stateFile) string {
+	profile := baseAWGProfile(cfg)
 	return fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = %s
@@ -947,7 +1116,7 @@ PersistentKeepalive = 25
 
 # AmneziaWG dialect: jc=%d jmin=%d jmax=%d s1=%d s2=%d s3=%d s4=%d h1=%s h2=%s h3=%s h4=%s
 `, st.AWG.SmokePrivate, st.AWG.SmokeIP, st.AWG.PublicKey, st.AWG.SmokePSK,
-		net.JoinHostPort(cfg.PublicAddress, strconv.Itoa(cfg.AWGPort)), cfg.AWGGateway,
+		net.JoinHostPort(cfg.PublicAddress, strconv.Itoa(profile.PublicPort)), profile.Gateway,
 		st.Dialect.Jc, st.Dialect.Jmin, st.Dialect.Jmax, st.Dialect.S1, st.Dialect.S2,
 		st.Dialect.S3, st.Dialect.S4, st.Dialect.H1, st.Dialect.H2, st.Dialect.H3, st.Dialect.H4)
 }

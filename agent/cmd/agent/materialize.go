@@ -26,16 +26,23 @@ const (
 )
 
 type approvedDevice struct {
-	DeviceID     string `json:"device_id"`
-	RealityUUID  string `json:"reality_uuid"`
-	AWGPublicKey string `json:"awg_public_key"`
-	InternalIP   string `json:"internal_ip"`
-	PSK2         string `json:"psk2"`
-	Status       string `json:"status"`
-	ExpiresAt    string `json:"expires_at,omitempty"`
+	DeviceID     string                              `json:"device_id"`
+	RealityUUID  string                              `json:"reality_uuid"`
+	AWGPublicKey string                              `json:"awg_public_key"`
+	InternalIP   string                              `json:"internal_ip"`
+	PSK2         string                              `json:"psk2"`
+	AWGProfiles  map[string]approvedDeviceAWGProfile `json:"awg_profiles,omitempty"`
+	Status       string                              `json:"status"`
+	ExpiresAt    string                              `json:"expires_at,omitempty"`
 	Limits       struct {
 		ExpiresAt *string `json:"expires_at,omitempty"`
 	} `json:"limits,omitempty"`
+}
+
+type approvedDeviceAWGProfile struct {
+	AWGPublicKey string `json:"awg_public_key"`
+	InternalIP   string `json:"internal_ip"`
+	PSK2         string `json:"psk2"`
 }
 
 type workerConfigDocument struct {
@@ -84,15 +91,17 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 	if err := applyXrayConfigWithRestart(cfg, xrayRaw, len(devices), xrayRestartDebounce); err != nil {
 		return err
 	}
-	desiredPeers, err := writeAWGPeerRegistry(cfg, st, devices)
-	if err != nil {
-		return fmt.Errorf("write awg peer registry: %w", err)
-	}
-	if cfg.AWGUAPISocket != "" {
-		if err := syncAWGUAPI(cfg.AWGUAPISocket, desiredPeers); err != nil {
-			return fmt.Errorf("sync awg uapi: %w", err)
+	for _, profile := range awgProfiles(cfg) {
+		desiredPeers, err := writeAWGPeerRegistryForProfile(cfg, st, devices, profile)
+		if err != nil {
+			return fmt.Errorf("write awg peer registry %s: %w", profile.Name, err)
 		}
-		log.Printf("awg materialized peers=%d via %s", len(desiredPeers), cfg.AWGUAPISocket)
+		if profile.UAPISocket != "" {
+			if err := syncAWGUAPI(profile.UAPISocket, desiredPeers); err != nil {
+				return fmt.Errorf("sync awg uapi %s: %w", profile.Name, err)
+			}
+			log.Printf("awg materialized profile=%s peers=%d via %s", profile.Name, len(desiredPeers), profile.UAPISocket)
+		}
 	}
 	return nil
 }
@@ -175,22 +184,35 @@ func filterUnexpiredApprovedDevices(devices []approvedDevice, now time.Time) []a
 }
 
 func writeAWGPeerRegistry(cfg envConfig, st stateFile, devices []approvedDevice) ([]awgDesiredPeer, error) {
+	return writeAWGPeerRegistryForProfile(cfg, st, devices, defaultAWGInboundProfile(cfg))
+}
+
+func writeAWGPeerRegistryForProfile(cfg envConfig, st stateFile, devices []approvedDevice, profile awgInboundProfile) ([]awgDesiredPeer, error) {
 	now := time.Now().UTC()
 	expires := time.Now().UTC().Add(3650 * 24 * time.Hour)
-	clients := []awgPeerRegistryClient{{
-		WGPublicKey: st.AWG.SmokePublic,
-		InternalIP:  st.AWG.SmokeIP,
-		PSK2:        st.AWG.SmokePSK,
-		ExpiresAt:   expires,
-	}}
-	desired := []awgDesiredPeer{{
-		PublicKey: st.AWG.SmokePublic,
-		PSK2:      st.AWG.SmokePSK,
-		AllowedIP: st.AWG.SmokeIP,
-	}}
-	seen := map[string]struct{}{st.AWG.SmokePublic: {}}
+	clients := []awgPeerRegistryClient{}
+	desired := []awgDesiredPeer{}
+	seen := map[string]struct{}{}
+	if profile.isBase() {
+		clients = append(clients, awgPeerRegistryClient{
+			WGPublicKey: st.AWG.SmokePublic,
+			InternalIP:  st.AWG.SmokeIP,
+			PSK2:        st.AWG.SmokePSK,
+			ExpiresAt:   expires,
+		})
+		desired = append(desired, awgDesiredPeer{
+			PublicKey: st.AWG.SmokePublic,
+			PSK2:      st.AWG.SmokePSK,
+			AllowedIP: st.AWG.SmokeIP,
+		})
+		seen[st.AWG.SmokePublic] = struct{}{}
+	}
 	for _, device := range devices {
-		if _, ok := seen[device.AWGPublicKey]; ok {
+		creds, ok := approvedDeviceProfileCreds(device, profile.Name)
+		if !ok {
+			continue
+		}
+		if _, ok := seen[creds.AWGPublicKey]; ok {
 			continue
 		}
 		deviceExpires := expires
@@ -201,23 +223,44 @@ func writeAWGPeerRegistry(cfg envConfig, st stateFile, devices []approvedDevice)
 			}
 			deviceExpires = parsed
 		}
-		seen[device.AWGPublicKey] = struct{}{}
+		seen[creds.AWGPublicKey] = struct{}{}
 		clients = append(clients, awgPeerRegistryClient{
-			WGPublicKey: device.AWGPublicKey,
-			InternalIP:  device.InternalIP,
-			PSK2:        device.PSK2,
+			WGPublicKey: creds.AWGPublicKey,
+			InternalIP:  creds.InternalIP,
+			PSK2:        creds.PSK2,
 			ExpiresAt:   deviceExpires,
 		})
 		desired = append(desired, awgDesiredPeer{
-			PublicKey: device.AWGPublicKey,
-			PSK2:      device.PSK2,
-			AllowedIP: device.InternalIP,
+			PublicKey: creds.AWGPublicKey,
+			PSK2:      creds.PSK2,
+			AllowedIP: creds.InternalIP,
 		})
 	}
-	if err := writeJSONFile(filepath.Join(cfg.StateDir, "awg", "peers.json"), awgPeerRegistry{Clients: clients}, 0o600); err != nil {
+	if err := writeJSONFile(profile.registryPath(cfg.StateDir), awgPeerRegistry{Clients: clients}, 0o600); err != nil {
 		return nil, err
 	}
 	return desired, nil
+}
+
+func approvedDeviceProfileCreds(device approvedDevice, profileName string) (approvedDeviceAWGProfile, bool) {
+	profileName = normalizeAWGProfileName(profileName)
+	if profileName == "" || profileName == "awg" {
+		if strings.TrimSpace(device.AWGPublicKey) == "" || strings.TrimSpace(device.InternalIP) == "" || strings.TrimSpace(device.PSK2) == "" {
+			return approvedDeviceAWGProfile{}, false
+		}
+		return approvedDeviceAWGProfile{AWGPublicKey: device.AWGPublicKey, InternalIP: device.InternalIP, PSK2: device.PSK2}, true
+	}
+	if device.AWGProfiles == nil {
+		return approvedDeviceAWGProfile{}, false
+	}
+	creds, ok := device.AWGProfiles[profileName]
+	if !ok {
+		return approvedDeviceAWGProfile{}, false
+	}
+	if strings.TrimSpace(creds.AWGPublicKey) == "" || strings.TrimSpace(creds.InternalIP) == "" || strings.TrimSpace(creds.PSK2) == "" {
+		return approvedDeviceAWGProfile{}, false
+	}
+	return creds, true
 }
 
 func approvedDeviceExpiry(device approvedDevice) (time.Time, bool) {

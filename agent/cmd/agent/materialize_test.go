@@ -71,6 +71,61 @@ func TestApprovedDevicesMaterializeToXrayAndAWGRegistry(t *testing.T) {
 	}
 }
 
+func TestAWGInboundProfilesDefaultAndJSON(t *testing.T) {
+	cfg := envConfig{
+		AWGPort:       51888,
+		AWGSubnet:     "10.13.13.0/24",
+		AWGGateway:    "10.13.13.1",
+		AWGUAPISocket: "/var/run/wireguard/awg1.sock",
+	}
+	profiles, err := parseAWGInboundProfiles("", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 1 || profiles[0].Name != "awg" || profiles[0].Interface != "awg1" || profiles[0].ListenPort != awgInPort || profiles[0].PublicPort != 51888 {
+		t.Fatalf("bad default profile: %+v", profiles)
+	}
+
+	raw := `[{"name":"awg","interface":"awg1","listen_port":51821,"subnet":"10.13.13.0/24","uapi_socket":"/tmp/awg1.sock"},{"name":"next","interface":"awg2","listen_port":52821,"subnet":"10.44.0.0/24","min_version_code":123}]`
+	profiles, err = parseAWGInboundProfiles(raw, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 2 || profiles[1].Name != "next" || profiles[1].Gateway != "10.44.0.1" || profiles[1].UAPISocket != "/var/run/wireguard/awg2.sock" || profiles[1].PublicPort != 52821 {
+		t.Fatalf("bad json profiles: %+v", profiles)
+	}
+}
+
+func TestWriteAWGPeerRegistryForAdditionalProfile(t *testing.T) {
+	cfg := envConfig{StateDir: t.TempDir(), AWGPort: 51888, AWGSubnet: "10.13.13.0/24", AWGGateway: "10.13.13.1", AWGUAPISocket: "/tmp/awg1.sock"}
+	st := stateFile{AWG: awgState{SmokePublic: keyB64(1), SmokePSK: keyB64(2), SmokeIP: "10.13.13.2/32"}}
+	profile := awgInboundProfile{Name: "next", Interface: "awg2", ListenPort: 52821, PublicPort: 52821, Subnet: "10.44.0.0/24", Gateway: "10.44.0.1", UAPISocket: "/tmp/awg2.sock"}
+	devices := []approvedDevice{{
+		DeviceID:     "device-a",
+		AWGPublicKey: keyB64(5),
+		InternalIP:   "10.13.13.10/32",
+		PSK2:         keyB64(6),
+		Status:       "approved",
+		AWGProfiles: map[string]approvedDeviceAWGProfile{
+			"next": {AWGPublicKey: keyB64(7), InternalIP: "10.44.0.10/32", PSK2: keyB64(8)},
+		},
+	}}
+	peers, err := writeAWGPeerRegistryForProfile(cfg, st, devices, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].PublicKey != keyB64(7) || peers[0].AllowedIP != "10.44.0.10/32" {
+		t.Fatalf("bad additional profile peers: %+v", peers)
+	}
+	raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "awg", "profiles", "next", "peers.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "10.13.13.10") || !strings.Contains(string(raw), "10.44.0.10") {
+		t.Fatalf("additional profile registry used wrong creds: %s", raw)
+	}
+}
+
 func TestApprovedDevicesRejectIncomplete(t *testing.T) {
 	_, err := approvedDevicesFromWorkerConfig(`{"desired_state":{"approved_devices":[{"device_id":"bad","status":"approved"}]}}`)
 	if err == nil {

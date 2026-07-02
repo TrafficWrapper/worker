@@ -88,6 +88,10 @@ type envConfig struct {
 	WorkerAgentURL   string
 	CamouflageDomain string
 	RealityDest      string
+	XrayNetwork      string
+	XHTTPPath        string
+	XHTTPMode        string
+	XHTTPExtraJSON   string
 	EgressIP         string
 	PublicAddress    string
 	DistributorURL   string
@@ -256,6 +260,10 @@ func readEnv() (envConfig, error) {
 		WorkerAgentURL:   os.Getenv("WORKER_AGENT_URL"),
 		CamouflageDomain: os.Getenv("CAMOUFLAGE_DOMAIN"),
 		RealityDest:      getenv("REALITY_DEST", fmt.Sprintf("awg-gw:%d", distributorTLS)),
+		XrayNetwork:      getenv("XRAY_NETWORK", "tcp"),
+		XHTTPPath:        os.Getenv("XRAY_XHTTP_PATH"),
+		XHTTPMode:        os.Getenv("XRAY_XHTTP_MODE"),
+		XHTTPExtraJSON:   os.Getenv("XRAY_XHTTP_EXTRA_JSON"),
 		EgressIP:         os.Getenv("EGRESS_IP"),
 		PublicAddress:    os.Getenv("PUBLIC_ADDRESS"),
 		DistributorURL:   getenv("DISTRIBUTOR_URL", fmt.Sprintf("http://awg-gw:%d/tw", distributorTW)),
@@ -284,6 +292,35 @@ func validateCamouflageDomain(domain string) error {
 	default:
 		return nil
 	}
+}
+
+func realityNetwork(cfg envConfig) string {
+	switch strings.ToLower(strings.TrimSpace(cfg.XrayNetwork)) {
+	case "xhttp":
+		return "xhttp"
+	default:
+		return "tcp"
+	}
+}
+
+func xhttpSettings(cfg envConfig) map[string]any {
+	if realityNetwork(cfg) != "xhttp" {
+		return nil
+	}
+	settings := map[string]any{
+		"path": strings.TrimSpace(cfg.XHTTPPath),
+		"mode": strings.TrimSpace(cfg.XHTTPMode),
+	}
+	extraRaw := strings.TrimSpace(cfg.XHTTPExtraJSON)
+	if extraRaw != "" {
+		var extra map[string]any
+		if err := json.Unmarshal([]byte(extraRaw), &extra); err != nil {
+			log.Printf("invalid XRAY_XHTTP_EXTRA_JSON ignored: %v", err)
+		} else {
+			settings["extra"] = extra
+		}
+	}
+	return settings
 }
 
 func bootstrap(cfg envConfig) (stateFile, error) {
@@ -485,6 +522,21 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 			"email": email,
 		})
 	}
+	streamSettings := map[string]any{
+		"network":  realityNetwork(cfg),
+		"security": "reality",
+		"realitySettings": map[string]any{
+			"show":        false,
+			"dest":        cfg.RealityDest,
+			"xver":        0,
+			"serverNames": []string{cfg.CamouflageDomain},
+			"privateKey":  st.Reality.PrivateKey,
+			"shortIds":    []string{st.Reality.ShortID},
+		},
+	}
+	if xhttp := xhttpSettings(cfg); xhttp != nil {
+		streamSettings["xhttpSettings"] = xhttp
+	}
 	xcfg := map[string]any{
 		"log": map[string]any{"loglevel": "info"},
 		"inbounds": []any{map[string]any{
@@ -496,18 +548,7 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 				"decryption": "none",
 				"clients":    clients,
 			},
-			"streamSettings": map[string]any{
-				"network":  "tcp",
-				"security": "reality",
-				"realitySettings": map[string]any{
-					"show":        false,
-					"dest":        cfg.RealityDest,
-					"xver":        0,
-					"serverNames": []string{cfg.CamouflageDomain},
-					"privateKey":  st.Reality.PrivateKey,
-					"shortIds":    []string{st.Reality.ShortID},
-				},
-			},
+			"streamSettings": streamSettings,
 		}},
 		"outbounds": []any{
 			map[string]any{"tag": "direct", "protocol": "freedom"},
@@ -638,6 +679,26 @@ func orchAppliedSeq(stateDir string) int64 {
 }
 
 func selfDescribe(cfg envConfig, st stateFile) map[string]any {
+	reality := map[string]any{
+		"transport":   "REALITY",
+		"address":     cfg.PublicAddress,
+		"port":        cfg.XrayPort,
+		"serverName":  cfg.CamouflageDomain,
+		"server_name": cfg.CamouflageDomain,
+		"dest":        cfg.RealityDest,
+		"publicKey":   st.Reality.PublicKey,
+		"public_key":  st.Reality.PublicKey,
+		"shortId":     st.Reality.ShortID,
+		"short_id":    st.Reality.ShortID,
+		"flow":        "",
+		"security":    "reality",
+		"network":     realityNetwork(cfg),
+		"fingerprint": "chrome",
+		"spiderX":     "/",
+	}
+	if xhttp := xhttpSettings(cfg); xhttp != nil {
+		reality["xhttp"] = xhttp
+	}
 	out := map[string]any{
 		"schema":          "trafficwrapper-worker-p0",
 		"hostname":        st.Hostname,
@@ -649,23 +710,7 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 		"dialect_id":      st.DialectID,
 		"capacity":        cfg.Capacity,
 		"protocols":       []string{"REALITY", "AWG"},
-		"reality": map[string]any{
-			"transport":   "REALITY",
-			"address":     cfg.PublicAddress,
-			"port":        cfg.XrayPort,
-			"serverName":  cfg.CamouflageDomain,
-			"server_name": cfg.CamouflageDomain,
-			"dest":        cfg.RealityDest,
-			"publicKey":   st.Reality.PublicKey,
-			"public_key":  st.Reality.PublicKey,
-			"shortId":     st.Reality.ShortID,
-			"short_id":    st.Reality.ShortID,
-			"flow":        "",
-			"security":    "reality",
-			"network":     "tcp",
-			"fingerprint": "chrome",
-			"spiderX":     "/",
-		},
+		"reality":         reality,
 		"awg": map[string]any{
 			"address":           cfg.PublicAddress,
 			"endpoint":          net.JoinHostPort(cfg.PublicAddress, strconv.Itoa(cfg.AWGPort)),

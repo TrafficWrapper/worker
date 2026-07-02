@@ -48,6 +48,9 @@ func TestApprovedDevicesMaterializeToXrayAndAWGRegistry(t *testing.T) {
 	if strings.Contains(string(xrayRaw), "xtls-rprx-vision") {
 		t.Fatalf("xray config should default to plain vless+reality without vision flow: %s", xrayRaw)
 	}
+	if strings.Contains(string(xrayRaw), "xhttpSettings") {
+		t.Fatalf("xray config should default to tcp reality without xhttp settings: %s", xrayRaw)
+	}
 	peers, err := writeAWGPeerRegistry(cfg, st, devices)
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +75,48 @@ func TestApprovedDevicesRejectIncomplete(t *testing.T) {
 	_, err := approvedDevicesFromWorkerConfig(`{"desired_state":{"approved_devices":[{"device_id":"bad","status":"approved"}]}}`)
 	if err == nil {
 		t.Fatal("incomplete approved device accepted")
+	}
+}
+
+func TestXrayConfigSupportsOptInXHTTPReality(t *testing.T) {
+	cfg := envConfig{
+		StateDir:         t.TempDir(),
+		RealityDest:      "awg-gw:9443",
+		CamouflageDomain: "www.microsoft.com",
+		XrayNetwork:      "xhttp",
+		XHTTPPath:        "/operator-path",
+		XHTTPMode:        "auto",
+		XHTTPExtraJSON:   `{"headers":{"X-Test":"1"}}`,
+	}
+	st := stateFile{
+		SmokeRealityUUID: "14526b0e-6de3-4407-bf8f-d8c688160ce6",
+		Reality:          realityState{PrivateKey: "priv", ShortID: "abcd", PublicKey: "pub"},
+	}
+
+	doc := xrayConfigDocument(cfg, st, nil)
+	inbounds := doc["inbounds"].([]any)
+	inbound := inbounds[0].(map[string]any)
+	stream := inbound["streamSettings"].(map[string]any)
+	if stream["network"] != "xhttp" {
+		t.Fatalf("xray network=%#v want xhttp", stream["network"])
+	}
+	xhttp := stream["xhttpSettings"].(map[string]any)
+	if xhttp["path"] != "/operator-path" || xhttp["mode"] != "auto" {
+		t.Fatalf("bad xhttp settings: %#v", xhttp)
+	}
+	extra := xhttp["extra"].(map[string]any)
+	headers := extra["headers"].(map[string]any)
+	if headers["X-Test"] != "1" {
+		t.Fatalf("bad xhttp extra: %#v", xhttp)
+	}
+
+	self := selfDescribe(cfg, st)
+	reality := self["reality"].(map[string]any)
+	if reality["network"] != "xhttp" {
+		t.Fatalf("self describe network=%#v want xhttp", reality["network"])
+	}
+	if _, ok := reality["xhttp"].(map[string]any); !ok {
+		t.Fatalf("self describe missing xhttp params: %#v", reality)
 	}
 }
 

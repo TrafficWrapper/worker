@@ -344,11 +344,12 @@ func configureEgressNAT(name, address string) error {
 	if err := ensureIPv4Forwarding(); err != nil {
 		return err
 	}
+	table := natTableName(name)
 	commands := [][]string{
-		{"nft", "add", "table", "ip", "trafficwrapper_awg"},
-		{"nft", "add", "chain", "ip", "trafficwrapper_awg", "postrouting", "{", "type", "nat", "hook", "postrouting", "priority", "srcnat", ";", "policy", "accept", ";", "}"},
-		{"nft", "flush", "chain", "ip", "trafficwrapper_awg", "postrouting"},
-		{"nft", "add", "rule", "ip", "trafficwrapper_awg", "postrouting", "oifname", "!=", name, "ip", "saddr", prefix.String(), "masquerade"},
+		{"nft", "add", "table", "ip", table},
+		{"nft", "add", "chain", "ip", table, "postrouting", "{", "type", "nat", "hook", "postrouting", "priority", "srcnat", ";", "policy", "accept", ";", "}"},
+		{"nft", "flush", "chain", "ip", table, "postrouting"},
+		{"nft", "add", "rule", "ip", table, "postrouting", "oifname", "!=", name, "ip", "saddr", prefix.String(), "masquerade"},
 	}
 	for _, args := range commands {
 		cmd := exec.Command(args[0], args[1:]...)
@@ -363,6 +364,29 @@ func configureEgressNAT(name, address string) error {
 	}
 	fmt.Printf("nat=enabled subnet=%s exclude_if=%s\n", prefix.String(), name)
 	return nil
+}
+
+func natTableName(iface string) string {
+	if iface == defaultInterface {
+		return "trafficwrapper_awg"
+	}
+	var b strings.Builder
+	for _, r := range iface {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "trafficwrapper_awg_custom"
+	}
+	return "trafficwrapper_awg_" + b.String()
 }
 
 func ensureIPv4Forwarding() error {
@@ -463,14 +487,14 @@ func loadConfig(path string) (Config, error) {
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.Interface != defaultInterface {
-		return fmt.Errorf("interface must be %s, got %s", defaultInterface, cfg.Interface)
+	if err := validateInterfaceName(cfg.Interface); err != nil {
+		return err
 	}
 	if _, err := netip.ParsePrefix(cfg.Address); err != nil {
 		return fmt.Errorf("invalid address prefix: %w", err)
 	}
-	if cfg.ListenPort != defaultPort {
-		return fmt.Errorf("listen_port must be %d, got %d", defaultPort, cfg.ListenPort)
+	if cfg.ListenPort < 1025 || cfg.ListenPort > 65535 {
+		return fmt.Errorf("listen_port must be in 1025..65535, got %d", cfg.ListenPort)
 	}
 	if len(cfg.PrivateKeyHex) != 64 {
 		return fmt.Errorf("private_key_hex must be 64 hex chars")
@@ -486,6 +510,20 @@ func validateConfig(cfg Config) error {
 	}
 	_, err := awgdialect.EffectiveMTU(device.DefaultMTU, cfg.Dialect)
 	return err
+}
+
+func validateInterfaceName(name string) error {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "":
+		return errors.New("interface must be set")
+	case len(name) > 15:
+		return fmt.Errorf("interface must be 15 chars or less, got %d", len(name))
+	case strings.ContainsAny(name, " \t\r\n/"):
+		return fmt.Errorf("interface must not contain whitespace or slash: %q", name)
+	default:
+		return nil
+	}
 }
 
 func parseHex32(value string) ([32]byte, error) {

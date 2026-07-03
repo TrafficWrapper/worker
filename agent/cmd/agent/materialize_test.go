@@ -192,6 +192,7 @@ func TestXrayConfigSupportsOptInXHTTPReality(t *testing.T) {
 		XrayNetwork:      "xhttp",
 		XHTTPPath:        "/operator-path",
 		XHTTPMode:        "auto",
+		XHTTPHost:        "cdn.operator.example",
 		XHTTPExtraJSON:   `{"headers":{"X-Test":"1"}}`,
 	}
 	st := stateFile{
@@ -210,6 +211,9 @@ func TestXrayConfigSupportsOptInXHTTPReality(t *testing.T) {
 	if xhttp["path"] != "/operator-path" || xhttp["mode"] != "auto" {
 		t.Fatalf("bad xhttp settings: %#v", xhttp)
 	}
+	if xhttp["host"] != "cdn.operator.example" {
+		t.Fatalf("bad xhttp host: %#v", xhttp)
+	}
 	extra := xhttp["extra"].(map[string]any)
 	headers := extra["headers"].(map[string]any)
 	if headers["X-Test"] != "1" {
@@ -221,8 +225,25 @@ func TestXrayConfigSupportsOptInXHTTPReality(t *testing.T) {
 	if reality["network"] != "xhttp" {
 		t.Fatalf("self describe network=%#v want xhttp", reality["network"])
 	}
-	if _, ok := reality["xhttp"].(map[string]any); !ok {
+	selfXHTTP, ok := reality["xhttp"].(map[string]any)
+	if !ok {
 		t.Fatalf("self describe missing xhttp params: %#v", reality)
+	}
+	if selfXHTTP["host"] != "cdn.operator.example" {
+		t.Fatalf("self describe xhttp host=%#v want configured host", selfXHTTP["host"])
+	}
+}
+
+func TestXHTTPHostDefaultsToCamouflageDomain(t *testing.T) {
+	cfg := envConfig{
+		CamouflageDomain: "www.microsoft.com",
+		XrayNetwork:      "xhttp",
+		XHTTPPath:        "/operator-path",
+		XHTTPMode:        "auto",
+	}
+	xhttp := xhttpSettings(cfg)
+	if xhttp["host"] != "www.microsoft.com" {
+		t.Fatalf("xhttp host=%#v want camouflage domain fallback", xhttp["host"])
 	}
 }
 

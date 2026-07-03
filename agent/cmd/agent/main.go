@@ -94,6 +94,7 @@ type envConfig struct {
 	XrayNetwork            string
 	XHTTPPath              string
 	XHTTPMode              string
+	XHTTPHost              string
 	XHTTPExtraJSON         string
 	EgressIP               string
 	PublicAddress          string
@@ -301,6 +302,7 @@ func readEnv() (envConfig, error) {
 		XrayNetwork:            getenv("XRAY_NETWORK", "tcp"),
 		XHTTPPath:              os.Getenv("XRAY_XHTTP_PATH"),
 		XHTTPMode:              os.Getenv("XRAY_XHTTP_MODE"),
+		XHTTPHost:              os.Getenv("XRAY_XHTTP_HOST"),
 		XHTTPExtraJSON:         os.Getenv("XRAY_XHTTP_EXTRA_JSON"),
 		EgressIP:               os.Getenv("EGRESS_IP"),
 		PublicAddress:          os.Getenv("PUBLIC_ADDRESS"),
@@ -522,6 +524,9 @@ func xhttpSettings(cfg envConfig) map[string]any {
 		"path": strings.TrimSpace(cfg.XHTTPPath),
 		"mode": strings.TrimSpace(cfg.XHTTPMode),
 	}
+	if host := xhttpHost(cfg); host != "" {
+		settings["host"] = host
+	}
 	extraRaw := strings.TrimSpace(cfg.XHTTPExtraJSON)
 	if extraRaw != "" {
 		var extra map[string]any
@@ -532,6 +537,13 @@ func xhttpSettings(cfg envConfig) map[string]any {
 		}
 	}
 	return settings
+}
+
+func xhttpHost(cfg envConfig) string {
+	if host := strings.TrimSpace(cfg.XHTTPHost); host != "" {
+		return host
+	}
+	return strings.TrimSpace(cfg.CamouflageDomain)
 }
 
 func bootstrap(cfg envConfig) (stateFile, error) {

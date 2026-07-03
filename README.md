@@ -162,6 +162,7 @@ binaries:
 | `XRAY_NETWORK` | Xray REALITY stream network. | Optional | `tcp` | Set `xhttp` only when the operator configures matching XHTTP params on this worker. |
 | `XRAY_XHTTP_PATH` | XHTTP path used when `XRAY_NETWORK=xhttp`. | Optional | empty | Operator-chosen path; no public default. |
 | `XRAY_XHTTP_MODE` | XHTTP mode used when `XRAY_NETWORK=xhttp`. | Optional | empty | Passed through to Xray `xhttpSettings.mode`. |
+| `XRAY_XHTTP_HOST` | XHTTP Host used when `XRAY_NETWORK=xhttp`. | Optional | `CAMOUFLAGE_DOMAIN` | Override only when the operator route config needs a different XHTTP host. |
 | `XRAY_XHTTP_EXTRA_JSON` | Extra XHTTP JSON object. | Optional | empty | Advanced passthrough as `xhttpSettings.extra`; keep empty unless you know the Xray field shape. |
 | `WORKER_STATE_DIR` | Worker state directory inside containers. | Optional | `/var/lib/trafficwrapper-worker` in binaries; Compose uses `/worker-state` | Keep Compose default unless running binaries manually. |
 | `TW_WORKER_DIALECT_JSON` | Advanced override for the AmneziaWG dialect JSON. | Optional | generated dialect | Use only for controlled testing. |

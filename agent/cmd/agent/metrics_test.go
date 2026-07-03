@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"net"
 	"net/http"
@@ -64,5 +65,31 @@ func TestMetricsHandlerExportsAWGPeerMetrics(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing metric %q in:\n%s", want, body)
 		}
+	}
+}
+
+func TestWriteAWGMetricsScrubsPeerLabelsWhenEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	peer := awgPeerConfig{
+		PublicKeyHex:     "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+		AllowedIPs:       []string{"10.13.13.2/32"},
+		Endpoint:         "198.51.100.10:54321",
+		RxBytes:          123,
+		TxBytes:          456,
+		LastHandshakeSec: 1710000000,
+	}
+	writeAWGMetricsWithOptions(&buf, "awg1", time.Now(), []awgPeerConfig{peer}, metricsOptions{
+		ScrubPeerLabels: true,
+		Salt:            "/worker-state",
+	})
+	body := buf.String()
+	if strings.Contains(body, peer.PublicKeyHex) {
+		t.Fatalf("raw peer leaked in scrubbed metrics:\n%s", body)
+	}
+	if strings.Contains(body, "endpoint=") || strings.Contains(body, peer.Endpoint) {
+		t.Fatalf("endpoint leaked in scrubbed metrics:\n%s", body)
+	}
+	if !strings.Contains(body, `peer="peer_`) {
+		t.Fatalf("scrubbed peer label missing:\n%s", body)
 	}
 }

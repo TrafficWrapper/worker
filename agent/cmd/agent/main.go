@@ -74,30 +74,31 @@ type awgState struct {
 }
 
 type envConfig struct {
-	StateDir         string
-	XrayPort         int
-	AWGPort          int
-	AWGSubnet        string
-	AWGGateway       string
-	AWGUAPISocket    string
-	AWGProfiles      []awgInboundProfile
-	XrayContainer    string
-	DockerSocket     string
-	OrchURL          string
-	OrchStaticPublic string
-	OrchInsecureTLS  bool
-	WorkerAgentURL   string
-	CamouflageDomain string
-	RealityDest      string
-	XrayNetwork      string
-	XHTTPPath        string
-	XHTTPMode        string
-	XHTTPExtraJSON   string
-	EgressIP         string
-	PublicAddress    string
-	DistributorURL   string
-	EnrollToken      string
-	Capacity         int
+	StateDir               string
+	XrayPort               int
+	AWGPort                int
+	AWGSubnet              string
+	AWGGateway             string
+	AWGUAPISocket          string
+	AWGProfiles            []awgInboundProfile
+	MetricsScrubPeerLabels bool
+	XrayContainer          string
+	DockerSocket           string
+	OrchURL                string
+	OrchStaticPublic       string
+	OrchInsecureTLS        bool
+	WorkerAgentURL         string
+	CamouflageDomain       string
+	RealityDest            string
+	XrayNetwork            string
+	XHTTPPath              string
+	XHTTPMode              string
+	XHTTPExtraJSON         string
+	EgressIP               string
+	PublicAddress          string
+	DistributorURL         string
+	EnrollToken            string
+	Capacity               int
 }
 
 type awgInboundProfile struct {
@@ -281,29 +282,30 @@ func readEnv() (envConfig, error) {
 		return envConfig{}, err
 	}
 	cfg := envConfig{
-		StateDir:         getenv("WORKER_STATE_DIR", stateDirDefault),
-		XrayPort:         getenvInt("XRAY_PORT", 2053),
-		AWGPort:          getenvInt("AWG_PORT", 51888),
-		AWGSubnet:        subnet,
-		AWGGateway:       getenv("AWG_GATEWAY", gateway),
-		AWGUAPISocket:    getenv("AWG_UAPI_SOCKET", "/var/run/wireguard/awg1.sock"),
-		XrayContainer:    os.Getenv("XRAY_CONTAINER_NAME"),
-		DockerSocket:     getenv("DOCKER_SOCKET", "/var/run/docker.sock"),
-		OrchURL:          os.Getenv("ORCH_URL"),
-		OrchStaticPublic: os.Getenv("ORCH_STATIC_PUBLIC_KEY"),
-		OrchInsecureTLS:  getenv("ORCH_INSECURE_TLS", "0") == "1",
-		WorkerAgentURL:   os.Getenv("WORKER_AGENT_URL"),
-		CamouflageDomain: os.Getenv("CAMOUFLAGE_DOMAIN"),
-		RealityDest:      getenv("REALITY_DEST", fmt.Sprintf("awg-gw:%d", distributorTLS)),
-		XrayNetwork:      getenv("XRAY_NETWORK", "tcp"),
-		XHTTPPath:        os.Getenv("XRAY_XHTTP_PATH"),
-		XHTTPMode:        os.Getenv("XRAY_XHTTP_MODE"),
-		XHTTPExtraJSON:   os.Getenv("XRAY_XHTTP_EXTRA_JSON"),
-		EgressIP:         os.Getenv("EGRESS_IP"),
-		PublicAddress:    os.Getenv("PUBLIC_ADDRESS"),
-		DistributorURL:   getenv("DISTRIBUTOR_URL", fmt.Sprintf("http://awg-gw:%d/tw", distributorTW)),
-		EnrollToken:      os.Getenv("ENROLL_TOKEN"),
-		Capacity:         getenvInt("CAPACITY", 32),
+		StateDir:               getenv("WORKER_STATE_DIR", stateDirDefault),
+		XrayPort:               getenvInt("XRAY_PORT", 2053),
+		AWGPort:                getenvInt("AWG_PORT", 51888),
+		AWGSubnet:              subnet,
+		AWGGateway:             getenv("AWG_GATEWAY", gateway),
+		AWGUAPISocket:          getenv("AWG_UAPI_SOCKET", "/var/run/wireguard/awg1.sock"),
+		MetricsScrubPeerLabels: getenv("TW_METRICS_SCRUB_PEER_LABELS", "0") == "1",
+		XrayContainer:          os.Getenv("XRAY_CONTAINER_NAME"),
+		DockerSocket:           getenv("DOCKER_SOCKET", "/var/run/docker.sock"),
+		OrchURL:                os.Getenv("ORCH_URL"),
+		OrchStaticPublic:       os.Getenv("ORCH_STATIC_PUBLIC_KEY"),
+		OrchInsecureTLS:        getenv("ORCH_INSECURE_TLS", "0") == "1",
+		WorkerAgentURL:         os.Getenv("WORKER_AGENT_URL"),
+		CamouflageDomain:       os.Getenv("CAMOUFLAGE_DOMAIN"),
+		RealityDest:            getenv("REALITY_DEST", fmt.Sprintf("awg-gw:%d", distributorTLS)),
+		XrayNetwork:            getenv("XRAY_NETWORK", "tcp"),
+		XHTTPPath:              os.Getenv("XRAY_XHTTP_PATH"),
+		XHTTPMode:              os.Getenv("XRAY_XHTTP_MODE"),
+		XHTTPExtraJSON:         os.Getenv("XRAY_XHTTP_EXTRA_JSON"),
+		EgressIP:               os.Getenv("EGRESS_IP"),
+		PublicAddress:          os.Getenv("PUBLIC_ADDRESS"),
+		DistributorURL:         getenv("DISTRIBUTOR_URL", fmt.Sprintf("http://awg-gw:%d/tw", distributorTW)),
+		EnrollToken:            os.Getenv("ENROLL_TOKEN"),
+		Capacity:               getenvInt("CAPACITY", 32),
 	}
 	if cfg.EgressIP == "" {
 		cfg.EgressIP = detectPublicEgressIP()

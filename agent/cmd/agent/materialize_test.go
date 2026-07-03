@@ -225,6 +225,9 @@ func TestXrayConfigSupportsOptInXHTTPReality(t *testing.T) {
 	if reality["network"] != "xhttp" {
 		t.Fatalf("self describe network=%#v want xhttp", reality["network"])
 	}
+	if reality["flow"] != "" {
+		t.Fatalf("self describe xhttp flow=%#v want blank", reality["flow"])
+	}
 	selfXHTTP, ok := reality["xhttp"].(map[string]any)
 	if !ok {
 		t.Fatalf("self describe missing xhttp params: %#v", reality)

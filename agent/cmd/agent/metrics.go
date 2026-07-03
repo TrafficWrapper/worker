@@ -54,9 +54,9 @@ func writeAWGMetricsWithOptions(w io.Writer, iface string, startedAt time.Time, 
 		if opts.ScrubPeerLabels {
 			peerLabel = scrubbedPeerLabel(opts.Salt, peer.PublicKeyHex)
 		}
-		labels := fmt.Sprintf("interface=%q,peer=%q,allowed_ip=%q", iface, peerLabel, strings.Join(allowedIPs, ","))
+		labels := fmt.Sprintf("interface=%q,peer=%q", iface, peerLabel)
 		if !opts.ScrubPeerLabels {
-			labels += fmt.Sprintf(",endpoint=%q", peer.Endpoint)
+			labels += fmt.Sprintf(",allowed_ip=%q,endpoint=%q", strings.Join(allowedIPs, ","), peer.Endpoint)
 		}
 		_, _ = fmt.Fprintf(w, "awg_peer_rx_bytes{%s} %d\n", labels, peer.RxBytes)
 		_, _ = fmt.Fprintf(w, "awg_peer_tx_bytes{%s} %d\n", labels, peer.TxBytes)

@@ -80,7 +80,7 @@ func TestWriteAWGMetricsScrubsPeerLabelsWhenEnabled(t *testing.T) {
 	}
 	writeAWGMetricsWithOptions(&buf, "awg1", time.Now(), []awgPeerConfig{peer}, metricsOptions{
 		ScrubPeerLabels: true,
-		Salt:            "/worker-state",
+		Salt:            "secret-salt-a",
 	})
 	body := buf.String()
 	if strings.Contains(body, peer.PublicKeyHex) {

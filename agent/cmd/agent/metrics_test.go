@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -89,7 +90,56 @@ func TestWriteAWGMetricsScrubsPeerLabelsWhenEnabled(t *testing.T) {
 	if strings.Contains(body, "endpoint=") || strings.Contains(body, peer.Endpoint) {
 		t.Fatalf("endpoint leaked in scrubbed metrics:\n%s", body)
 	}
+	if strings.Contains(body, "allowed_ip=") || strings.Contains(body, "10.13.13.2/32") {
+		t.Fatalf("allowed_ip leaked in scrubbed metrics:\n%s", body)
+	}
 	if !strings.Contains(body, `peer="peer_`) {
 		t.Fatalf("scrubbed peer label missing:\n%s", body)
+	}
+}
+
+func TestScrubbedPeerLabelUsesRotatableSecretSalt(t *testing.T) {
+	peer := "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	first := scrubbedPeerLabel("secret-a", peer)
+	if first != scrubbedPeerLabel("secret-a", peer) {
+		t.Fatalf("scrubbed label is not stable for fixed salt")
+	}
+	if first == scrubbedPeerLabel("secret-b", peer) {
+		t.Fatalf("scrubbed label did not change after salt rotation")
+	}
+	if first == scrubbedPeerLabel("/worker-state", peer) {
+		t.Fatalf("test secret unexpectedly matched public state-dir salt")
+	}
+}
+
+func TestLoadMetricsScrubSaltPersistsSecretFileAndEnvOverride(t *testing.T) {
+	stateDir := t.TempDir()
+	first, err := loadMetricsScrubSalt(stateDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == "" || first == stateDir {
+		t.Fatalf("unexpected generated salt %q for stateDir %q", first, stateDir)
+	}
+	info, err := os.Stat(filepath.Join(stateDir, metricsScrubSaltFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("metrics salt file mode=%#o, want 0600", got)
+	}
+	second, err := loadMetricsScrubSalt(stateDir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("salt was not persisted: first=%q second=%q", first, second)
+	}
+	override, err := loadMetricsScrubSalt(stateDir, " override-secret ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if override != "override-secret" {
+		t.Fatalf("env override=%q, want override-secret", override)
 	}
 }

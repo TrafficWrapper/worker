@@ -82,6 +82,7 @@ type envConfig struct {
 	AWGUAPISocket          string
 	AWGProfiles            []awgInboundProfile
 	MetricsScrubPeerLabels bool
+	MetricsScrubSalt       string
 	XrayContainer          string
 	DockerSocket           string
 	OrchURL                string
@@ -306,6 +307,13 @@ func readEnv() (envConfig, error) {
 		DistributorURL:         getenv("DISTRIBUTOR_URL", fmt.Sprintf("http://awg-gw:%d/tw", distributorTW)),
 		EnrollToken:            os.Getenv("ENROLL_TOKEN"),
 		Capacity:               getenvInt("CAPACITY", 32),
+	}
+	if cfg.MetricsScrubPeerLabels {
+		salt, err := loadMetricsScrubSalt(cfg.StateDir, os.Getenv("TW_METRICS_SCRUB_SALT"))
+		if err != nil {
+			return envConfig{}, fmt.Errorf("load metrics scrub salt: %w", err)
+		}
+		cfg.MetricsScrubSalt = salt
 	}
 	if cfg.EgressIP == "" {
 		cfg.EgressIP = detectPublicEgressIP()

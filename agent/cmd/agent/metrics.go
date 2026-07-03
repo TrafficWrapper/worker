@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -13,6 +16,7 @@ import (
 )
 
 const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
+const metricsScrubSaltFile = "metrics_salt"
 
 var quotaBlocksTotal atomic.Uint64
 
@@ -28,7 +32,7 @@ func metricsHandler(cfg envConfig, startedAt time.Time) http.HandlerFunc {
 		}
 		writeAWGMetricsWithOptions(w, awgMetricsInterface(), startedAt, peers, metricsOptions{
 			ScrubPeerLabels: cfg.MetricsScrubPeerLabels,
-			Salt:            cfg.StateDir,
+			Salt:            cfg.MetricsScrubSalt,
 		})
 	}
 }
@@ -67,6 +71,34 @@ func writeAWGMetricsWithOptions(w io.Writer, iface string, startedAt time.Time, 
 func scrubbedPeerLabel(salt, peerHex string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(salt) + "\x00" + strings.TrimSpace(peerHex)))
 	return "peer_" + hex.EncodeToString(sum[:8])
+}
+
+func loadMetricsScrubSalt(stateDir, override string) (string, error) {
+	if salt := strings.TrimSpace(override); salt != "" {
+		return salt, nil
+	}
+	path := filepath.Join(stateDir, metricsScrubSaltFile)
+	if raw, err := os.ReadFile(path); err == nil {
+		salt := strings.TrimSpace(string(raw))
+		if salt != "" {
+			_ = os.Chmod(path, 0o600)
+			return salt, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	salt := hex.EncodeToString(raw)
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(salt+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return salt, nil
 }
 
 func awgMetricsInterface() string {

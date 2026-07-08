@@ -77,6 +77,23 @@ func TestApplyDiscoveredEndpointsRejectsTamperedSignedBundle(t *testing.T) {
 	}
 }
 
+func TestApplyDiscoveredEndpointsRejectsHostnameAWGWithoutEgressIP(t *testing.T) {
+	signer := newTestSigner(t)
+	base := testBaseConfig(t)
+	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
+	awg := bundle["endpoints"].(map[string]any)["awg"].([]any)[0].(map[string]any)
+	delete(awg, "egress_ip")
+	req := signer.request(t, bundle, base, 9, "2026-06-13T12:00:00Z")
+
+	result := decodeApplyResult(t, ApplyDiscoveredEndpoints(req))
+	if result.OK {
+		t.Fatal("hostname AWG endpoint without egress_ip was accepted")
+	}
+	if !strings.Contains(result.Error, "must be an IP literal") {
+		t.Fatalf("error=%q want IP literal failure", result.Error)
+	}
+}
+
 func TestApplyDiscoveredEndpointsRejectsWrongSignature(t *testing.T) {
 	signer := newTestSigner(t)
 	other := newTestSigner(t)
@@ -219,7 +236,8 @@ func testBundle(t *testing.T, seq int64, issuedAt string, expiresAt string) map[
 			"awg": []any{
 				map[string]any{
 					"priority":          0,
-					"endpoint":          "198.51.100.50:51821",
+					"endpoint":          "worker.example:51821",
+					"egress_ip":         "198.51.100.50",
 					"server_public_key": testDiscoveredServerKey,
 					"awg_preset":        awgdialect.Compat(),
 				},

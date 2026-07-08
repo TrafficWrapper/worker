@@ -131,7 +131,8 @@ type publicRouteSpec struct {
 	Address   string          `json:"address,omitempty"`
 	Port      int             `json:"port,omitempty"`
 	Endpoint  string          `json:"endpoint,omitempty"`
-	EgressIP  string          `json:"expected_egress_ip,omitempty"`
+	EgressIP  string          `json:"egress_ip,omitempty"`
+	LegacyIP  string          `json:"expected_egress_ip,omitempty"`
 	PublicKey string          `json:"public_key,omitempty"`
 	Dialect   json.RawMessage `json:"dialect,omitempty"`
 	AWGPreset json.RawMessage `json:"awg_preset,omitempty"`
@@ -385,7 +386,7 @@ func publicAWGConfigJSON(route *publicRouteSpec, req publicApplyAPIRequest, sock
 	if endpoint == "" && route.Address != "" && route.Port > 0 {
 		endpoint = fmt.Sprintf("%s:%d", route.Address, route.Port)
 	}
-	endpoint = endpointUsingPinnedIP(endpoint, route.EgressIP)
+	endpoint = endpointUsingPinnedIP(endpoint, route.egressIP())
 	serverKey := strings.TrimSpace(route.PublicKey)
 	if serverKey == "" {
 		serverKey = req.ServerAWGPublic
@@ -431,6 +432,13 @@ func endpointUsingPinnedIP(endpoint string, ip string) string {
 		return endpoint
 	}
 	return net.JoinHostPort(ip, port)
+}
+
+func (r *publicRouteSpec) egressIP() string {
+	if value := strings.TrimSpace(r.EgressIP); value != "" {
+		return value
+	}
+	return strings.TrimSpace(r.LegacyIP)
 }
 
 func (r *publicRouteSpec) preset() (preset, error) {

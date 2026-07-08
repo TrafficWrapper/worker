@@ -2,14 +2,17 @@ package transport
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
 func TestPublicAWGConfigJSONPinsHostnameEndpointWithExpectedEgressIP(t *testing.T) {
-	route := &publicRouteSpec{
-		Endpoint:  "worker.example:51888",
-		EgressIP:  "198.51.100.44",
-		PublicKey: testKey(2),
+	var route publicRouteSpec
+	if err := json.Unmarshal([]byte(fmt.Sprintf(
+		`{"endpoint":"worker.example:51888","egress_ip":"198.51.100.44","public_key":%q}`,
+		testKey(2),
+	)), &route); err != nil {
+		t.Fatal(err)
 	}
 	req := publicApplyAPIRequest{
 		AWGPrivateKey:   testKey(1),
@@ -18,7 +21,7 @@ func TestPublicAWGConfigJSONPinsHostnameEndpointWithExpectedEgressIP(t *testing.
 		ServerAWGPublic: testKey(2),
 		MTU:             1420,
 	}
-	raw, err := publicAWGConfigJSON(route, req, "127.0.0.1:18080")
+	raw, err := publicAWGConfigJSON(&route, req, "127.0.0.1:18080")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +47,6 @@ func TestPublicAWGConfigJSONRejectsHostnameEndpointWithoutPinnedIP(t *testing.T)
 		MTU:             1420,
 	}
 	if _, err := publicAWGConfigJSON(route, req, "127.0.0.1:18080"); err == nil {
-		t.Fatal("hostname endpoint without expected_egress_ip was accepted")
+		t.Fatal("hostname endpoint without egress_ip was accepted")
 	}
 }

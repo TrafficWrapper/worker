@@ -51,6 +51,7 @@ type discoveredEndpoints struct {
 type discoveredAWGEndpoint struct {
 	Priority        int    `json:"priority"`
 	Endpoint        string `json:"endpoint"`
+	EgressIP        string `json:"egress_ip,omitempty"`
 	ServerPublicKey string `json:"server_public_key"`
 	AWGPreset       preset `json:"awg_preset"`
 }
@@ -196,7 +197,7 @@ func mergeDiscoveredAWGConfig(baseJSON string, awg discoveredAWGEndpoint) (strin
 	if err := json.Unmarshal([]byte(baseJSON), &base); err != nil {
 		return "", fmt.Errorf("parse base config json: %w", err)
 	}
-	base.Endpoint = strings.TrimSpace(awg.Endpoint)
+	base.Endpoint = endpointUsingPinnedIP(strings.TrimSpace(awg.Endpoint), awg.EgressIP)
 	base.ServerPublicKey = strings.TrimSpace(awg.ServerPublicKey)
 	base.AWGPreset = awg.AWGPreset
 	raw, err := json.Marshal(base)

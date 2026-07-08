@@ -99,28 +99,14 @@ func normalizeEndpoint(endpoint string) (string, error) {
 	if _, err := netip.ParseAddrPort(endpoint); err == nil {
 		return endpoint, nil
 	}
-	host, port, err := net.SplitHostPort(endpoint)
+	host, _, err := net.SplitHostPort(endpoint)
 	if err != nil {
 		return "", fmt.Errorf("endpoint %q: %w", endpoint, err)
 	}
 	if _, err := netip.ParseAddr(host); err == nil {
 		return endpoint, nil
 	}
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return "", fmt.Errorf("resolve endpoint host %q: %w", host, err)
-	}
-	for _, ip := range ips {
-		if ip4 := ip.To4(); ip4 != nil {
-			return net.JoinHostPort(ip4.String(), port), nil
-		}
-	}
-	for _, ip := range ips {
-		if ip16 := ip.To16(); ip16 != nil {
-			return net.JoinHostPort(ip16.String(), port), nil
-		}
-	}
-	return "", fmt.Errorf("resolve endpoint host %q: no IP addresses", host)
+	return "", fmt.Errorf("endpoint host %q must be an IP literal; refusing system DNS lookup", host)
 }
 
 func validatePreset(p preset, mtu int) error {

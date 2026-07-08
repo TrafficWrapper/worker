@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -129,6 +131,7 @@ type publicRouteSpec struct {
 	Address   string          `json:"address,omitempty"`
 	Port      int             `json:"port,omitempty"`
 	Endpoint  string          `json:"endpoint,omitempty"`
+	EgressIP  string          `json:"expected_egress_ip,omitempty"`
 	PublicKey string          `json:"public_key,omitempty"`
 	Dialect   json.RawMessage `json:"dialect,omitempty"`
 	AWGPreset json.RawMessage `json:"awg_preset,omitempty"`
@@ -382,6 +385,7 @@ func publicAWGConfigJSON(route *publicRouteSpec, req publicApplyAPIRequest, sock
 	if endpoint == "" && route.Address != "" && route.Port > 0 {
 		endpoint = fmt.Sprintf("%s:%d", route.Address, route.Port)
 	}
+	endpoint = endpointUsingPinnedIP(endpoint, route.EgressIP)
 	serverKey := strings.TrimSpace(route.PublicKey)
 	if serverKey == "" {
 		serverKey = req.ServerAWGPublic
@@ -408,6 +412,25 @@ func publicAWGConfigJSON(route *publicRouteSpec, req publicApplyAPIRequest, sock
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func endpointUsingPinnedIP(endpoint string, ip string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	ip = strings.TrimSpace(ip)
+	if endpoint == "" || ip == "" {
+		return endpoint
+	}
+	if _, err := netip.ParseAddr(ip); err != nil {
+		return endpoint
+	}
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil || host == "" || port == "" {
+		return endpoint
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return endpoint
+	}
+	return net.JoinHostPort(ip, port)
 }
 
 func (r *publicRouteSpec) preset() (preset, error) {

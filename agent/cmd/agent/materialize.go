@@ -296,12 +296,14 @@ func syncAWGUAPI(socketPath string, desired []awgDesiredPeer) error {
 		}
 		desiredHex[hexKey] = struct{}{}
 	}
-	for _, peer := range current {
-		if _, ok := desiredHex[peer.PublicKeyHex]; ok {
-			continue
-		}
-		if err := removeAWGPeerHex(socketPath, peer.PublicKeyHex); err != nil {
-			return err
+	if desiredErr == nil {
+		for _, peer := range current {
+			if _, ok := desiredHex[peer.PublicKeyHex]; ok {
+				continue
+			}
+			if err := removeAWGPeerHex(socketPath, peer.PublicKeyHex); err != nil {
+				return err
+			}
 		}
 	}
 	for _, peer := range desired {

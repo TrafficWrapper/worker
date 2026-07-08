@@ -187,8 +187,13 @@ func TestApprovedDevicesRejectIncomplete(t *testing.T) {
 	}
 }
 
-func TestSyncAWGUAPIRemovesStalePeerBeforeRejectingBadDesired(t *testing.T) {
+func TestSyncAWGUAPISkipsRemovalWhenDesiredSetIsIncomplete(t *testing.T) {
 	staleHex := strings.Repeat("a", 64)
+	validKey := keyB64(9)
+	validHex, err := base64KeyToHex(validKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	socketPath, requests := startFakeUAPIServer(t, []string{
 		"public_key=" + staleHex,
 		"allowed_ip=10.13.13.2/32",
@@ -196,13 +201,47 @@ func TestSyncAWGUAPIRemovesStalePeerBeforeRejectingBadDesired(t *testing.T) {
 		"",
 		"",
 	})
-	err := syncAWGUAPI(socketPath, []awgDesiredPeer{{
+	err = syncAWGUAPI(socketPath, []awgDesiredPeer{{
 		PublicKey: "not-a-base64-key",
 		PSK2:      keyB64(1),
 		AllowedIP: "10.13.13.10/32",
+	}, {
+		PublicKey: validKey,
+		PSK2:      keyB64(2),
+		AllowedIP: "10.13.13.11/32",
 	}})
 	if err == nil {
 		t.Fatal("bad desired key accepted")
+	}
+	var seenRemove bool
+	var seenAdd bool
+	for _, req := range collectUAPIRequests(requests) {
+		if strings.Contains(req, "remove=true") && strings.Contains(req, "public_key="+staleHex) {
+			seenRemove = true
+		}
+		if strings.Contains(req, "set=1") && strings.Contains(req, "public_key="+validHex) && !strings.Contains(req, "remove=true") {
+			seenAdd = true
+		}
+	}
+	if seenRemove {
+		t.Fatalf("stale peer removed despite incomplete desired set")
+	}
+	if !seenAdd {
+		t.Fatalf("valid desired peer was not added while reporting bad peer")
+	}
+}
+
+func TestSyncAWGUAPIRemovesStalePeerWhenDesiredSetIsComplete(t *testing.T) {
+	staleHex := strings.Repeat("b", 64)
+	socketPath, requests := startFakeUAPIServer(t, []string{
+		"public_key=" + staleHex,
+		"allowed_ip=10.13.13.2/32",
+		"errno=0",
+		"",
+		"",
+	})
+	if err := syncAWGUAPI(socketPath, nil); err != nil {
+		t.Fatal(err)
 	}
 	var seenRemove bool
 	for _, req := range collectUAPIRequests(requests) {
@@ -211,7 +250,7 @@ func TestSyncAWGUAPIRemovesStalePeerBeforeRejectingBadDesired(t *testing.T) {
 		}
 	}
 	if !seenRemove {
-		t.Fatalf("stale peer was not removed before bad desired error")
+		t.Fatalf("stale peer was not removed with complete desired set")
 	}
 }
 

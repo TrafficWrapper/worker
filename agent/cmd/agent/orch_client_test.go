@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -27,7 +29,7 @@ func TestVerifyOrchBundleRejectsUnsignedAndRollback(t *testing.T) {
 	}
 }
 
-func TestApplyOrchBundlesRejectsClientBundleRollback(t *testing.T) {
+func TestApplyOrchBundlesAllowsEqualClientSeqAndSkipsStrictRollback(t *testing.T) {
 	pub, priv, err := minisign.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("GenerateKey: %v", err)
@@ -44,17 +46,32 @@ func TestApplyOrchBundlesRejectsClientBundleRollback(t *testing.T) {
 	}
 	state := orchState{SignerPublicKey: pubText, AppliedSeq: 9, ClientAppliedSeq: 5}
 	workerBundle := signedBundleForTest(t, priv, pubText, "worker-config-v1", 10, `,"desired_state":{"approved_devices":[]}`)
-	rollbackClient := signedBundleForTest(t, priv, pubText, "client-config-v1", 5, "")
-	if _, _, err := applyOrchBundles(cfg, st, state, workerBundle, rollbackClient, nil); err == nil || !strings.Contains(err.Error(), "rollback") {
-		t.Fatalf("client rollback accepted or wrong error: %v", err)
-	}
-	nextClient := signedBundleForTest(t, priv, pubText, "client-config-v1", 6, "")
-	seq, clientSeq, err := applyOrchBundles(cfg, st, state, workerBundle, nextClient, nil)
+	equalClient := signedBundleForTest(t, priv, pubText, "client-config-v1", 5, "")
+	seq, clientSeq, err := applyOrchBundles(cfg, st, state, workerBundle, equalClient, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seq != 10 || clientSeq != 6 {
-		t.Fatalf("seq=(%d,%d), want (10,6)", seq, clientSeq)
+	if seq != 10 || clientSeq != 5 {
+		t.Fatalf("equal client seq apply=(%d,%d), want (10,5)", seq, clientSeq)
+	}
+
+	state.AppliedSeq = 10
+	state.ClientAppliedSeq = 5
+	nextWorker := signedBundleForTest(t, priv, pubText, "worker-config-v1", 11, `,"desired_state":{"approved_devices":[]}`)
+	rollbackClient := signedBundleForTest(t, priv, pubText, "client-config-v1", 4, "")
+	seq, clientSeq, err = applyOrchBundles(cfg, st, state, nextWorker, rollbackClient, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 11 || clientSeq != 5 {
+		t.Fatalf("rollback client seq apply=(%d,%d), want worker applied and client unchanged (11,5)", seq, clientSeq)
+	}
+	raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "orch", "worker-config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"seq":11`) {
+		t.Fatalf("worker bundle was not written after client rollback:\n%s", raw)
 	}
 }
 

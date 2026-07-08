@@ -379,9 +379,13 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 	if err != nil {
 		return 0, 0, err
 	}
-	clientSeq, err := verifyOrchBundle(clientBundle, state.SignerPublicKey, state.ClientAppliedSeq, "client-config-v1")
-	if err != nil {
-		return 0, 0, err
+	clientSeq := state.ClientAppliedSeq
+	clientBundleOK := false
+	if nextClientSeq, err := verifyOrchBundleAllowEqual(clientBundle, state.SignerPublicKey, state.ClientAppliedSeq, "client-config-v1"); err != nil {
+		log.Printf("client bundle apply skipped: %v", err)
+	} else {
+		clientSeq = nextClientSeq
+		clientBundleOK = true
 	}
 	if err := writeFile(filepath.Join(cfg.StateDir, "orch", "worker-config.json"), []byte(workerBundle.ConfigJSON+"\n"), 0o600); err != nil {
 		return 0, 0, err
@@ -389,11 +393,13 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 	if err := writeFile(filepath.Join(cfg.StateDir, "orch", "worker-config.minisig"), []byte(workerBundle.Minisig), 0o600); err != nil {
 		return 0, 0, err
 	}
-	if err := writeFile(filepath.Join(cfg.StateDir, "distributor", "tw", "config.json"), []byte(clientBundle.ConfigJSON+"\n"), 0o644); err != nil {
-		return 0, 0, err
-	}
-	if err := writeFile(filepath.Join(cfg.StateDir, "distributor", "tw", "config.json.minisig"), []byte(clientBundle.Minisig), 0o644); err != nil {
-		return 0, 0, err
+	if clientBundleOK {
+		if err := writeFile(filepath.Join(cfg.StateDir, "distributor", "tw", "config.json"), []byte(clientBundle.ConfigJSON+"\n"), 0o644); err != nil {
+			return 0, 0, err
+		}
+		if err := writeFile(filepath.Join(cfg.StateDir, "distributor", "tw", "config.json.minisig"), []byte(clientBundle.Minisig), 0o644); err != nil {
+			return 0, 0, err
+		}
 	}
 	if update != nil {
 		if err := writeUpdateArtifact(cfg, update); err != nil {
@@ -442,6 +448,14 @@ func writeUpdateArtifact(cfg envConfig, update *orchUpdateArtifact) error {
 }
 
 func verifyOrchBundle(bundle orchSignedConfig, pinnedPublicKey string, maxSeen int64, expectedNS string) (int64, error) {
+	return verifyOrchBundleSeq(bundle, pinnedPublicKey, maxSeen, expectedNS, false)
+}
+
+func verifyOrchBundleAllowEqual(bundle orchSignedConfig, pinnedPublicKey string, maxSeen int64, expectedNS string) (int64, error) {
+	return verifyOrchBundleSeq(bundle, pinnedPublicKey, maxSeen, expectedNS, true)
+}
+
+func verifyOrchBundleSeq(bundle orchSignedConfig, pinnedPublicKey string, maxSeen int64, expectedNS string, allowEqual bool) (int64, error) {
 	if strings.TrimSpace(bundle.ConfigJSON) == "" || strings.TrimSpace(bundle.Minisig) == "" {
 		return 0, errors.New("bundle is empty or unsigned")
 	}
@@ -464,6 +478,12 @@ func verifyOrchBundle(bundle orchSignedConfig, pinnedPublicKey string, maxSeen i
 	}
 	if meta.Namespace != expectedNS {
 		return 0, fmt.Errorf("unexpected bundle namespace %q", meta.Namespace)
+	}
+	if allowEqual {
+		if meta.Seq < maxSeen {
+			return 0, fmt.Errorf("bundle rollback: seq=%d max_seen=%d", meta.Seq, maxSeen)
+		}
+		return meta.Seq, nil
 	}
 	if meta.Seq <= maxSeen {
 		return 0, fmt.Errorf("bundle rollback: seq=%d max_seen=%d", meta.Seq, maxSeen)

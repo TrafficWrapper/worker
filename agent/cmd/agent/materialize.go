@@ -285,15 +285,16 @@ func syncAWGUAPI(socketPath string, desired []awgDesiredPeer) error {
 		return err
 	}
 	desiredHex := make(map[string]struct{}, len(desired))
+	var desiredErr error
 	for _, peer := range desired {
 		hexKey, err := base64KeyToHex(peer.PublicKey)
 		if err != nil {
-			return fmt.Errorf("desired peer public key: %w", err)
+			if desiredErr == nil {
+				desiredErr = fmt.Errorf("desired peer public key: %w", err)
+			}
+			continue
 		}
 		desiredHex[hexKey] = struct{}{}
-		if err := addAWGPeer(socketPath, peer); err != nil {
-			return err
-		}
 	}
 	for _, peer := range current {
 		if _, ok := desiredHex[peer.PublicKeyHex]; ok {
@@ -302,6 +303,17 @@ func syncAWGUAPI(socketPath string, desired []awgDesiredPeer) error {
 		if err := removeAWGPeerHex(socketPath, peer.PublicKeyHex); err != nil {
 			return err
 		}
+	}
+	for _, peer := range desired {
+		if _, err := base64KeyToHex(peer.PublicKey); err != nil {
+			continue
+		}
+		if err := addAWGPeer(socketPath, peer); err != nil {
+			return err
+		}
+	}
+	if desiredErr != nil {
+		return desiredErr
 	}
 	return nil
 }

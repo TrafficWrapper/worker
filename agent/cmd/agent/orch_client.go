@@ -25,10 +25,11 @@ import (
 const orchestratorPrologue = "TrafficWrapper orchestrator worker v1"
 
 type orchState struct {
-	WorkerID        string `json:"worker_id"`
-	Status          string `json:"status"`
-	SignerPublicKey string `json:"signer_public_key"`
-	AppliedSeq      int64  `json:"applied_seq"`
+	WorkerID         string `json:"worker_id"`
+	Status           string `json:"status"`
+	SignerPublicKey  string `json:"signer_public_key"`
+	AppliedSeq       int64  `json:"applied_seq"`
+	ClientAppliedSeq int64  `json:"client_applied_seq,omitempty"`
 }
 
 type orchStartRequest struct {
@@ -205,13 +206,14 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile) {
 			reportOrchAck(client, cfg, st, state.WorkerID, state.AppliedSeq)
 			continue
 		}
-		seq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)
+		seq, clientSeq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)
 		if err != nil {
 			log.Printf("orch apply rejected: %v", err)
 			sleepCtx(ctx, 5*time.Second)
 			continue
 		}
 		state.AppliedSeq = seq
+		state.ClientAppliedSeq = clientSeq
 		_ = saveOrchState(cfg.StateDir, state)
 		reportOrchAck(client, cfg, st, state.WorkerID, seq)
 		sleepCtx(ctx, 5*time.Second)
@@ -372,33 +374,34 @@ func (c *orchClient) postJSON(path string, req any, resp any) error {
 
 const maxOrchResponseBytes = 128 << 20
 
-func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle, clientBundle orchSignedConfig, update *orchUpdateArtifact) (int64, error) {
+func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle, clientBundle orchSignedConfig, update *orchUpdateArtifact) (int64, int64, error) {
 	seq, err := verifyOrchBundle(workerBundle, state.SignerPublicKey, state.AppliedSeq, "worker-config-v1")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	if _, err := verifyOrchBundle(clientBundle, state.SignerPublicKey, 0, "client-config-v1"); err != nil {
-		return 0, err
+	clientSeq, err := verifyOrchBundle(clientBundle, state.SignerPublicKey, state.ClientAppliedSeq, "client-config-v1")
+	if err != nil {
+		return 0, 0, err
 	}
 	if err := writeFile(filepath.Join(cfg.StateDir, "orch", "worker-config.json"), []byte(workerBundle.ConfigJSON+"\n"), 0o600); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := writeFile(filepath.Join(cfg.StateDir, "orch", "worker-config.minisig"), []byte(workerBundle.Minisig), 0o600); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := writeFile(filepath.Join(cfg.StateDir, "distributor", "tw", "config.json"), []byte(clientBundle.ConfigJSON+"\n"), 0o644); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if err := writeFile(filepath.Join(cfg.StateDir, "distributor", "tw", "config.json.minisig"), []byte(clientBundle.Minisig), 0o644); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if update != nil {
 		if err := writeUpdateArtifact(cfg, update); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	if err := materializeApprovedDevices(cfg, st, workerBundle.ConfigJSON); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	version := map[string]any{"version": fmt.Sprintf("orch-v%d", seq), "config_seq": seq, "created_at": time.Now().UTC().Format(time.RFC3339)}
 	if apk := distributedAPKInfo(cfg.StateDir); len(apk) > 0 {
@@ -408,9 +411,9 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 		}
 	}
 	if err := writeJSONFile(filepath.Join(cfg.StateDir, "distributor", "tw", "version.json"), version, 0o644); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return seq, nil
+	return seq, clientSeq, nil
 }
 
 func writeUpdateArtifact(cfg envConfig, update *orchUpdateArtifact) error {

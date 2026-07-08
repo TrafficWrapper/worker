@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -181,6 +184,96 @@ func TestApprovedDevicesRejectIncomplete(t *testing.T) {
 	_, err := approvedDevicesFromWorkerConfig(`{"desired_state":{"approved_devices":[{"device_id":"bad","status":"approved"}]}}`)
 	if err == nil {
 		t.Fatal("incomplete approved device accepted")
+	}
+}
+
+func TestSyncAWGUAPIRemovesStalePeerBeforeRejectingBadDesired(t *testing.T) {
+	staleHex := strings.Repeat("a", 64)
+	socketPath, requests := startFakeUAPIServer(t, []string{
+		"public_key=" + staleHex,
+		"allowed_ip=10.13.13.2/32",
+		"errno=0",
+		"",
+		"",
+	})
+	err := syncAWGUAPI(socketPath, []awgDesiredPeer{{
+		PublicKey: "not-a-base64-key",
+		PSK2:      keyB64(1),
+		AllowedIP: "10.13.13.10/32",
+	}})
+	if err == nil {
+		t.Fatal("bad desired key accepted")
+	}
+	var seenRemove bool
+	for _, req := range collectUAPIRequests(requests) {
+		if strings.Contains(req, "remove=true") && strings.Contains(req, "public_key="+staleHex) {
+			seenRemove = true
+		}
+	}
+	if !seenRemove {
+		t.Fatalf("stale peer was not removed before bad desired error")
+	}
+}
+
+func startFakeUAPIServer(t *testing.T, getResponse []string) (string, <-chan string) {
+	t.Helper()
+	socketPath := filepath.Join(t.TempDir(), "awg.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan string, 8)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				reader := bufio.NewReader(conn)
+				var lines []string
+				for {
+					line, err := reader.ReadString('\n')
+					if err != nil {
+						return
+					}
+					line = strings.TrimSpace(line)
+					if line == "" {
+						break
+					}
+					lines = append(lines, line)
+				}
+				req := strings.Join(lines, "\n")
+				requests <- req
+				if strings.Contains(req, "get=1") {
+					_, _ = io.WriteString(conn, strings.Join(getResponse, "\n"))
+					return
+				}
+				_, _ = io.WriteString(conn, "errno=0\n\n")
+			}(conn)
+		}
+	}()
+	return socketPath, requests
+}
+
+func collectUAPIRequests(requests <-chan string) []string {
+	var out []string
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	for {
+		select {
+		case req := <-requests:
+			out = append(out, req)
+		case <-timer.C:
+			return out
+		}
 	}
 }
 

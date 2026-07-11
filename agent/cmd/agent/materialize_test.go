@@ -369,6 +369,48 @@ func TestXrayConfigSupportsOptInXHTTPReality(t *testing.T) {
 	}
 }
 
+func TestXrayConfigEnablesLoopbackUserStats(t *testing.T) {
+	cfg := envConfig{
+		RealityDest:      "awg-gw:9443",
+		CamouflageDomain: "example.com",
+	}
+	st := stateFile{
+		SmokeRealityUUID: "14526b0e-6de3-4407-bf8f-d8c688160ce6",
+		Reality:          realityState{PrivateKey: "priv", ShortID: "abcd"},
+	}
+	doc := xrayConfigDocument(cfg, st, []approvedDevice{{
+		DeviceID:    "device-a",
+		RealityUUID: "4fad2182-6de3-4407-bf8f-d8c688160ce6",
+		Status:      "approved",
+	}})
+	inbounds := doc["inbounds"].([]any)
+	if len(inbounds) != 2 {
+		t.Fatalf("inbounds=%d want 2", len(inbounds))
+	}
+	reality := inbounds[0].(map[string]any)
+	clients := reality["settings"].(map[string]any)["clients"].([]any)
+	deviceClient := clients[1].(map[string]any)
+	if deviceClient["email"] != "device-a" || deviceClient["level"] != 0 {
+		t.Fatalf("device stats identity missing: %#v", deviceClient)
+	}
+	apiInbound := inbounds[1].(map[string]any)
+	if apiInbound["tag"] != "api" || apiInbound["listen"] != "127.0.0.1" || apiInbound["port"] != xrayAPIInPort {
+		t.Fatalf("api inbound is not loopback-only: %#v", apiInbound)
+	}
+	api := doc["api"].(map[string]any)
+	services := api["services"].([]string)
+	if len(services) != 1 || services[0] != "StatsService" {
+		t.Fatalf("stats service missing: %#v", api)
+	}
+	level := doc["policy"].(map[string]any)["levels"].(map[string]any)["0"].(map[string]any)
+	if level["statsUserUplink"] != true || level["statsUserDownlink"] != true {
+		t.Fatalf("per-user stats policy missing: %#v", level)
+	}
+	if _, ok := doc["stats"].(map[string]any); !ok {
+		t.Fatalf("stats block missing: %#v", doc["stats"])
+	}
+}
+
 func TestXHTTPHostDefaultsToCamouflageDomain(t *testing.T) {
 	cfg := envConfig{
 		CamouflageDomain: "www.microsoft.com",

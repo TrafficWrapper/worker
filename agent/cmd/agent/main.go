@@ -38,6 +38,7 @@ import (
 const (
 	stateDirDefault       = "/worker-state"
 	xrayInPort            = 8443
+	xrayAPIInPort         = 10085
 	awgInPort             = 51821
 	distributorTLS        = 9443
 	distributorTW         = 8080
@@ -726,6 +727,7 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 	clients := []any{map[string]any{
 		"id":    st.SmokeRealityUUID,
 		"email": "p0-smoke",
+		"level": 0,
 	}}
 	seen := map[string]struct{}{st.SmokeRealityUUID: {}}
 	for _, device := range devices {
@@ -743,6 +745,7 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		clients = append(clients, map[string]any{
 			"id":    device.RealityUUID,
 			"email": email,
+			"level": 0,
 		})
 	}
 	streamSettings := map[string]any{
@@ -760,23 +763,51 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 	if xhttp := xhttpSettings(cfg); xhttp != nil {
 		streamSettings["xhttpSettings"] = xhttp
 	}
+	realityInbound := map[string]any{
+		"tag":      "reality-in",
+		"listen":   "0.0.0.0",
+		"port":     xrayInPort,
+		"protocol": "vless",
+		"settings": map[string]any{
+			"decryption": "none",
+			"clients":    clients,
+		},
+		"streamSettings": streamSettings,
+	}
+	apiInbound := map[string]any{
+		"tag":      "api",
+		"listen":   "127.0.0.1",
+		"port":     xrayAPIInPort,
+		"protocol": "dokodemo-door",
+		"settings": map[string]any{"address": "127.0.0.1"},
+	}
 	xcfg := map[string]any{
-		"log": map[string]any{"loglevel": "info"},
-		"inbounds": []any{map[string]any{
-			"tag":      "reality-in",
-			"listen":   "0.0.0.0",
-			"port":     xrayInPort,
-			"protocol": "vless",
-			"settings": map[string]any{
-				"decryption": "none",
-				"clients":    clients,
-			},
-			"streamSettings": streamSettings,
-		}},
+		"log":      map[string]any{"loglevel": "info"},
+		"inbounds": []any{realityInbound, apiInbound},
 		"outbounds": []any{
 			map[string]any{"tag": "direct", "protocol": "freedom"},
 			map[string]any{"tag": "block", "protocol": "blackhole"},
 		},
+		"api": map[string]any{
+			"tag":      "api",
+			"services": []string{"StatsService"},
+		},
+		"policy": map[string]any{
+			"levels": map[string]any{
+				"0": map[string]any{
+					"statsUserUplink":   true,
+					"statsUserDownlink": true,
+				},
+			},
+		},
+		"routing": map[string]any{
+			"rules": []any{map[string]any{
+				"type":        "field",
+				"inboundTag":  []string{"api"},
+				"outboundTag": "api",
+			}},
+		},
+		"stats": map[string]any{},
 	}
 	return xcfg
 }

@@ -128,6 +128,7 @@ type orchAckResponse struct {
 type orchUsageReport struct {
 	DeviceID     string `json:"device_id,omitempty"`
 	AWGPublicKey string `json:"awg_public_key,omitempty"`
+	Source       string `json:"source,omitempty"`
 	RxBytes      uint64 `json:"rx_bytes,omitempty"`
 	TxBytes      uint64 `json:"tx_bytes,omitempty"`
 }
@@ -221,10 +222,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile) {
 }
 
 func reportOrchAck(client *orchClient, cfg envConfig, st stateFile, workerID string, seq int64) {
-	usage, err := collectAWGUsageReports(cfg, cachedApprovedDevices(cfg.StateDir))
-	if err != nil {
-		log.Printf("awg usage report skipped: %v", err)
-	}
+	usage := collectWorkerUsageReports(cfg, cachedApprovedDevices(cfg.StateDir))
 	ack, err := client.ack(workerID, seq, cfg.EgressIP, selfDescribe(cfg, st), usage)
 	if err != nil {
 		log.Printf("orch ack failed: %v", err)
@@ -234,6 +232,20 @@ func reportOrchAck(client *orchClient, cfg envConfig, st stateFile, workerID str
 		quotaBlocksTotal.Add(uint64(ack.QuotaBlocks))
 	}
 	log.Printf("orch ack ok applied=%d desired=%d egress_probe=%s match=%t", ack.AppliedSeq, ack.DesiredSeq, ack.EgressIPProbe, ack.EgressMatch)
+}
+
+func collectWorkerUsageReports(cfg envConfig, devices []approvedDevice) []orchUsageReport {
+	usage, err := collectAWGUsageReports(cfg, devices)
+	if err != nil {
+		log.Printf("awg usage report skipped: %v", err)
+	}
+	reality, err := collectRealityUsageReports(cfg, devices)
+	if err != nil {
+		log.Printf("reality usage report skipped: %v", err)
+	} else {
+		usage = append(usage, reality...)
+	}
+	return usage
 }
 
 type orchClient struct {

@@ -21,7 +21,6 @@ import (
 )
 
 const (
-	awgPeerKeepaliveSec = 25
 	xrayRestartDebounce = 2 * time.Second
 )
 
@@ -333,7 +332,7 @@ func addAWGPeer(socketPath string, peer awgDesiredPeer) error {
 		"set=1",
 		"public_key=" + pubHex,
 		"preshared_key=" + pskHex,
-		fmt.Sprintf("persistent_keepalive_interval=%d", awgPeerKeepaliveSec),
+		"persistent_keepalive_interval=0",
 		"replace_allowed_ips=true",
 		"allowed_ip=" + peer.AllowedIP,
 		"",

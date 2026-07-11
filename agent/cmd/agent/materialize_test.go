@@ -254,6 +254,27 @@ func TestSyncAWGUAPIRemovesStalePeerWhenDesiredSetIsComplete(t *testing.T) {
 	}
 }
 
+func TestAddAWGPeerDisablesServerSideKeepalive(t *testing.T) {
+	socketPath, requests := startFakeUAPIServer(t, nil)
+	if err := addAWGPeer(socketPath, awgDesiredPeer{
+		PublicKey: keyB64(9),
+		PSK2:      keyB64(10),
+		AllowedIP: "10.13.13.10/32",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reqs := collectUAPIRequests(requests)
+	if len(reqs) != 1 {
+		t.Fatalf("requests=%d want 1: %q", len(reqs), reqs)
+	}
+	if !strings.Contains(reqs[0], "persistent_keepalive_interval=0") {
+		t.Fatalf("server peer does not explicitly disable keepalive: %s", reqs[0])
+	}
+	if !strings.Contains(reqs[0], "allowed_ip=10.13.13.10/32") {
+		t.Fatalf("server peer config incomplete: %s", reqs[0])
+	}
+}
+
 func startFakeUAPIServer(t *testing.T, getResponse []string) (string, <-chan string) {
 	t.Helper()
 	socketPath := filepath.Join(t.TempDir(), "awg.sock")

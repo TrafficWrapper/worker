@@ -68,3 +68,19 @@ func TestNATTableNamePreservesDefaultAndSeparatesProfiles(t *testing.T) {
 		t.Fatalf("custom NAT table=%q", got)
 	}
 }
+
+func TestDeviceConfigLinesDisableServerSideKeepalive(t *testing.T) {
+	cfg := validTestConfig()
+	lines := deviceConfigLines(cfg, []restoredPeer{{
+		PublicKeyHex: strings.Repeat("1", 64),
+		PSKHex:       strings.Repeat("2", 64),
+		AllowedIP:    "10.13.13.10/32",
+	}})
+	raw := strings.Join(lines, "\n")
+	if !strings.Contains(raw, "persistent_keepalive_interval=0") {
+		t.Fatalf("server peer does not explicitly disable keepalive: %s", raw)
+	}
+	if !strings.Contains(raw, "allowed_ip=10.13.13.10/32") {
+		t.Fatalf("server peer config incomplete: %s", raw)
+	}
+}

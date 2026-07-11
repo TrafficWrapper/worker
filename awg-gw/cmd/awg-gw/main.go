@@ -26,12 +26,11 @@ import (
 )
 
 const (
-	defaultInterface    = "awg1"
-	defaultAddress      = "10.13.13.1/24"
-	defaultPort         = 51821
-	defaultConfig       = "/worker-state/awg/awg-gw.json"
-	defaultRegistry     = "/worker-state/provisioning/clients.json"
-	awgPeerKeepaliveSec = 25
+	defaultInterface = "awg1"
+	defaultAddress   = "10.13.13.1/24"
+	defaultPort      = 51821
+	defaultConfig    = "/worker-state/awg/awg-gw.json"
+	defaultRegistry  = "/worker-state/provisioning/clients.json"
 )
 
 var version = "dev"
@@ -238,6 +237,15 @@ func applyDeviceConfig(dev *device.Device, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	uapiConfig := strings.Join(deviceConfigLines(cfg, peers), "\n")
+	if err := dev.IpcSetOperation(strings.NewReader(uapiConfig)); err != nil {
+		return fmt.Errorf("apply UAPI config: %w", err)
+	}
+	fmt.Printf("restored_peers=%d\n", len(peers))
+	return nil
+}
+
+func deviceConfigLines(cfg Config, peers []restoredPeer) []string {
 	lines := []string{
 		"private_key=" + cfg.PrivateKeyHex,
 		"listen_port=" + strconv.Itoa(cfg.ListenPort),
@@ -248,18 +256,13 @@ func applyDeviceConfig(dev *device.Device, cfg Config) error {
 		lines = append(lines,
 			"public_key="+peer.PublicKeyHex,
 			"preshared_key="+peer.PSKHex,
-			fmt.Sprintf("persistent_keepalive_interval=%d", awgPeerKeepaliveSec),
+			"persistent_keepalive_interval=0",
 			"replace_allowed_ips=true",
 			"allowed_ip="+peer.AllowedIP,
 		)
 	}
 	lines = append(lines, "")
-	uapiConfig := strings.Join(lines, "\n")
-	if err := dev.IpcSetOperation(strings.NewReader(uapiConfig)); err != nil {
-		return fmt.Errorf("apply UAPI config: %w", err)
-	}
-	fmt.Printf("restored_peers=%d\n", len(peers))
-	return nil
+	return lines
 }
 
 func loadActivePeers(path string, now time.Time) ([]restoredPeer, error) {

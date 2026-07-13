@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -71,16 +72,84 @@ func TestNATTableNamePreservesDefaultAndSeparatesProfiles(t *testing.T) {
 
 func TestDeviceConfigLinesDisableServerSideKeepalive(t *testing.T) {
 	cfg := validTestConfig()
-	lines := deviceConfigLines(cfg, []restoredPeer{{
-		PublicKeyHex: strings.Repeat("1", 64),
-		PSKHex:       strings.Repeat("2", 64),
-		AllowedIP:    "10.13.13.10/32",
-	}})
-	raw := strings.Join(lines, "\n")
-	if !strings.Contains(raw, "persistent_keepalive_interval=0") {
-		t.Fatalf("server peer does not explicitly disable keepalive: %s", raw)
+	lines := deviceConfigLines(cfg, []restoredPeer{
+		{
+			PublicKeyHex: strings.Repeat("1", 64),
+			PSKHex:       strings.Repeat("2", 64),
+			AllowedIP:    "10.13.13.10/32",
+		},
+		{
+			PublicKeyHex: strings.Repeat("3", 64),
+			PSKHex:       strings.Repeat("4", 64),
+			AllowedIP:    "10.13.13.11/32",
+		},
+	})
+	if err := validatePeerUAPIBlocks(lines, 2, "persistent_keepalive_interval=0"); err != nil {
+		t.Fatalf("server peer config malformed: %v\n%s", err, strings.Join(lines, "\n"))
 	}
-	if !strings.Contains(raw, "allowed_ip=10.13.13.10/32") {
-		t.Fatalf("server peer config incomplete: %s", raw)
+}
+
+func TestPeerUAPIBlockValidationRejectsKeepaliveMutants(t *testing.T) {
+	valid := []string{
+		"private_key=" + strings.Repeat("0", 64),
+		"listen_port=51821",
+		"public_key=" + strings.Repeat("1", 64),
+		"preshared_key=" + strings.Repeat("2", 64),
+		"persistent_keepalive_interval=0",
+		"replace_allowed_ips=true",
+		"allowed_ip=10.13.13.10/32",
+		"public_key=" + strings.Repeat("3", 64),
+		"preshared_key=" + strings.Repeat("4", 64),
+		"persistent_keepalive_interval=0",
+		"replace_allowed_ips=true",
+		"allowed_ip=10.13.13.11/32",
 	}
+	if err := validatePeerUAPIBlocks(valid, 2, "persistent_keepalive_interval=0"); err != nil {
+		t.Fatalf("valid fixture rejected: %v", err)
+	}
+	interfaceKeepalive := append([]string(nil), valid...)
+	interfaceKeepalive = append(interfaceKeepalive[:2], append([]string{"persistent_keepalive_interval=0"}, interfaceKeepalive[2:]...)...)
+	if err := validatePeerUAPIBlocks(interfaceKeepalive, 2, "persistent_keepalive_interval=0"); err == nil {
+		t.Fatal("keepalive in interface section was not rejected")
+	}
+	missingFirst := append([]string(nil), valid...)
+	missingFirst = append(missingFirst[:4], missingFirst[5:]...)
+	if err := validatePeerUAPIBlocks(missingFirst, 2, "persistent_keepalive_interval=0"); err == nil {
+		t.Fatal("missing keepalive in first peer block was not rejected")
+	}
+}
+
+func validatePeerUAPIBlocks(lines []string, wantPeers int, keepaliveLine string) error {
+	peers := 0
+	keepalivePositions := map[int]struct{}{}
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "public_key=") {
+			continue
+		}
+		peers++
+		if i+4 >= len(lines) ||
+			!strings.HasPrefix(lines[i+1], "preshared_key=") ||
+			lines[i+2] != keepaliveLine ||
+			lines[i+3] != "replace_allowed_ips=true" ||
+			!strings.HasPrefix(lines[i+4], "allowed_ip=") {
+			end := i + 5
+			if end > len(lines) {
+				end = len(lines)
+			}
+			return fmt.Errorf("peer block malformed at %d: %q", i, lines[i:end])
+		}
+		keepalivePositions[i+2] = struct{}{}
+	}
+	if peers != wantPeers {
+		return fmt.Errorf("peers=%d want %d", peers, wantPeers)
+	}
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "persistent_keepalive_interval=") {
+			continue
+		}
+		if _, ok := keepalivePositions[i]; !ok {
+			return fmt.Errorf("keepalive outside peer block at %d", i)
+		}
+	}
+	return nil
 }

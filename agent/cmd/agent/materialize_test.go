@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -256,23 +257,94 @@ func TestSyncAWGUAPIRemovesStalePeerWhenDesiredSetIsComplete(t *testing.T) {
 
 func TestAddAWGPeerDisablesServerSideKeepalive(t *testing.T) {
 	socketPath, requests := startFakeUAPIServer(t, nil)
-	if err := addAWGPeer(socketPath, awgDesiredPeer{
-		PublicKey: keyB64(9),
-		PSK2:      keyB64(10),
-		AllowedIP: "10.13.13.10/32",
-	}); err != nil {
-		t.Fatal(err)
+	peers := []awgDesiredPeer{
+		{PublicKey: keyB64(9), PSK2: keyB64(10), AllowedIP: "10.13.13.10/32"},
+		{PublicKey: keyB64(11), PSK2: keyB64(12), AllowedIP: "10.13.13.11/32"},
+	}
+	for _, peer := range peers {
+		if err := addAWGPeer(socketPath, peer); err != nil {
+			t.Fatal(err)
+		}
 	}
 	reqs := collectUAPIRequests(requests)
-	if len(reqs) != 1 {
-		t.Fatalf("requests=%d want 1: %q", len(reqs), reqs)
+	if len(reqs) != len(peers) {
+		t.Fatalf("requests=%d want %d: %q", len(reqs), len(peers), reqs)
 	}
-	if !strings.Contains(reqs[0], "persistent_keepalive_interval=0") {
-		t.Fatalf("server peer does not explicitly disable keepalive: %s", reqs[0])
+	found := 0
+	for _, req := range reqs {
+		lines := strings.Split(req, "\n")
+		if err := validateAgentPeerUAPIBlocks(lines, 1, "persistent_keepalive_interval=0"); err != nil {
+			t.Fatalf("server peer config malformed: %v\n%s", err, req)
+		}
+		found++
 	}
-	if !strings.Contains(reqs[0], "allowed_ip=10.13.13.10/32") {
-		t.Fatalf("server peer config incomplete: %s", reqs[0])
+	if found != 2 {
+		t.Fatalf("peer blocks=%d want 2", found)
 	}
+}
+
+func TestAgentPeerUAPIBlockValidationRejectsKeepaliveMutants(t *testing.T) {
+	valid := []string{
+		"set=1",
+		"public_key=" + strings.Repeat("09", 32),
+		"preshared_key=" + strings.Repeat("0a", 32),
+		"persistent_keepalive_interval=0",
+		"replace_allowed_ips=true",
+		"allowed_ip=10.13.13.10/32",
+		"public_key=" + strings.Repeat("0b", 32),
+		"preshared_key=" + strings.Repeat("0c", 32),
+		"persistent_keepalive_interval=0",
+		"replace_allowed_ips=true",
+		"allowed_ip=10.13.13.11/32",
+	}
+	if err := validateAgentPeerUAPIBlocks(valid, 2, "persistent_keepalive_interval=0"); err != nil {
+		t.Fatalf("valid fixture rejected: %v", err)
+	}
+	interfaceKeepalive := append([]string(nil), valid...)
+	interfaceKeepalive = append(interfaceKeepalive[:1], append([]string{"persistent_keepalive_interval=0"}, interfaceKeepalive[1:]...)...)
+	if err := validateAgentPeerUAPIBlocks(interfaceKeepalive, 2, "persistent_keepalive_interval=0"); err == nil {
+		t.Fatal("keepalive in device section was not rejected")
+	}
+	missingFirst := append([]string(nil), valid...)
+	missingFirst = append(missingFirst[:3], missingFirst[4:]...)
+	if err := validateAgentPeerUAPIBlocks(missingFirst, 2, "persistent_keepalive_interval=0"); err == nil {
+		t.Fatal("missing keepalive in first peer block was not rejected")
+	}
+}
+
+func validateAgentPeerUAPIBlocks(lines []string, wantPeers int, keepaliveLine string) error {
+	peers := 0
+	keepalivePositions := map[int]struct{}{}
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "public_key=") {
+			continue
+		}
+		peers++
+		if i+4 >= len(lines) ||
+			!strings.HasPrefix(lines[i+1], "preshared_key=") ||
+			lines[i+2] != keepaliveLine ||
+			lines[i+3] != "replace_allowed_ips=true" ||
+			!strings.HasPrefix(lines[i+4], "allowed_ip=") {
+			end := i + 5
+			if end > len(lines) {
+				end = len(lines)
+			}
+			return fmt.Errorf("peer block malformed at %d: %q", i, lines[i:end])
+		}
+		keepalivePositions[i+2] = struct{}{}
+	}
+	if peers != wantPeers {
+		return fmt.Errorf("peers=%d want %d", peers, wantPeers)
+	}
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "persistent_keepalive_interval=") {
+			continue
+		}
+		if _, ok := keepalivePositions[i]; !ok {
+			return fmt.Errorf("keepalive outside peer block at %d", i)
+		}
+	}
+	return nil
 }
 
 func startFakeUAPIServer(t *testing.T, getResponse []string) (string, <-chan string) {

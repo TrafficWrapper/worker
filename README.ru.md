@@ -155,6 +155,7 @@ binaries:
 | `AWG_SUBNET` | Worker AWG subnet для internal IP устройств. | Опц. | `10.13.13.0/24` | Private subnet без конфликтов с host. |
 | `AWG_GATEWAY` | AWG gateway address внутри `AWG_SUBNET`. | Опц. | первый host subnet | `10.13.13.1`. |
 | `AWG_UAPI_SOCKET` | WireGuard/AmneziaWG UAPI socket path. | Опц. | `/var/run/wireguard/awg1.sock` | Обычно задаёт Compose. |
+| `AWG_SERVER_KEEPALIVE` | Политика server-side persistent keepalive для всех AWG peer. | Опц. | `0` | Runtime-откат: вернуть прежнее значение и перезапустить `agent` вместе с `awg-gw`. |
 | `XRAY_CONTAINER_NAME` | Docker container name, который agent перезапускает/переписывает для Xray после изменения approved devices. | Опц. | `worker-xray-1` | Compose задаёт стабильный `container_name` с этим значением; меняйте только вместе с именем xray service container. |
 | `DOCKER_SOCKET` | Docker socket path для agent. | Опц. | `/var/run/docker.sock` | Compose монтирует host Docker socket. |
 | `DISTRIBUTOR_URL` | Internal URL `/tw/` distributor. | Опц. | `http://awg-gw:8080/tw` | Оставьте default для Compose. |
@@ -181,6 +182,13 @@ binaries:
 | `AWG_CLIENT_PRIVATE_KEY` | Override smoke client private key. | Опц. | generated state value | Secret; только для smoke debugging. |
 | `AWG_CLIENT_PSK` | Override smoke client PSK. | Опц. | generated state value | Secret; только для smoke debugging. |
 | `AWG_CLIENT_IP` | Override smoke client internal IP. | Опц. | generated state value | Например `10.13.13.250`. |
+
+При выкладке новой реализации peer-policy `agent` и `awg-gw` нужно собирать и
+перезапускать вместе. Само значение задаётся во время запуска: для отката без
+пересборки измените `AWG_SERVER_KEEPALIVE` в `.env` и перезапустите оба сервиса.
+Отключение server keepalive само по себе не доказывает достижимость idle-клиента
+за carrier NAT: для этого нужны отдельная device-проба и подтверждение оператора
+из плана выкладки.
 
 ## Локальная проверка сборки
 

@@ -89,6 +89,40 @@ func TestDeviceConfigLinesDisableServerSideKeepalive(t *testing.T) {
 	}
 }
 
+func TestDeviceConfigLinesUseConfiguredServerKeepalive(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.ServerKeepalive = 17
+	lines := deviceConfigLines(cfg, []restoredPeer{{
+		PublicKeyHex: strings.Repeat("1", 64),
+		PSKHex:       strings.Repeat("2", 64),
+		AllowedIP:    "10.13.13.10/32",
+	}})
+	if err := validatePeerUAPIBlocks(lines, 1, "persistent_keepalive_interval=17"); err != nil {
+		t.Fatalf("configured server peer keepalive missing: %v\n%s", err, strings.Join(lines, "\n"))
+	}
+}
+
+func TestServerKeepaliveEnvOverridesConfigAndRejectsInvalidValues(t *testing.T) {
+	t.Setenv("AWG_SERVER_KEEPALIVE", "")
+	got, err := serverKeepaliveFromEnv(9)
+	if err != nil || got != 9 {
+		t.Fatalf("config fallback=%d err=%v, want 9", got, err)
+	}
+	t.Setenv("AWG_SERVER_KEEPALIVE", "17")
+	got, err = serverKeepaliveFromEnv(9)
+	if err != nil || got != 17 {
+		t.Fatalf("env override=%d err=%v, want 17", got, err)
+	}
+	for _, value := range []string{"invalid", "-1", "65536"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("AWG_SERVER_KEEPALIVE", value)
+			if _, err := serverKeepaliveFromEnv(0); err == nil {
+				t.Fatalf("invalid keepalive %q accepted", value)
+			}
+		})
+	}
+}
+
 func TestPeerUAPIBlockValidationRejectsKeepaliveMutants(t *testing.T) {
 	valid := []string{
 		"private_key=" + strings.Repeat("0", 64),

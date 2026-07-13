@@ -18,22 +18,26 @@ import (
 const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
 const metricsScrubSaltFile = "metrics_salt"
 
-var quotaBlocksTotal atomic.Uint64
+var (
+	quotaBlocksTotal        atomic.Uint64
+	awgPeerPolicyDriftTotal atomic.Uint64
+)
 
 func metricsHandler(cfg envConfig, startedAt time.Time) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", metricsContentType)
-		peers, err := listAWGPeerConfigs(cfg.AWGUAPISocket)
-		if err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = fmt.Fprintf(w, "tw_worker_awg_interface_up{interface=%q} 0\n", awgMetricsInterface())
-			_, _ = fmt.Fprintf(w, "tw_worker_awg_scrape_error{interface=%q,error=%q} 1\n", awgMetricsInterface(), err.Error())
-			return
+		_, _ = fmt.Fprintf(w, "awg_peer_policy_drift_total %d\n", awgPeerPolicyDriftTotal.Load())
+		for _, snapshot := range collectAWGProfilePeerSnapshots(cfg) {
+			if snapshot.Error != "" {
+				_, _ = fmt.Fprintf(w, "tw_worker_awg_interface_up{interface=%q} 0\n", snapshot.Interface)
+				_, _ = fmt.Fprintf(w, "tw_worker_awg_scrape_error{interface=%q,error=%q} 1\n", snapshot.Interface, snapshot.Error)
+				continue
+			}
+			writeAWGMetricsWithOptions(w, snapshot.Interface, startedAt, snapshot.Peers, metricsOptions{
+				ScrubPeerLabels: cfg.MetricsScrubPeerLabels,
+				Salt:            cfg.MetricsScrubSalt,
+			})
 		}
-		writeAWGMetricsWithOptions(w, awgMetricsInterface(), startedAt, peers, metricsOptions{
-			ScrubPeerLabels: cfg.MetricsScrubPeerLabels,
-			Salt:            cfg.MetricsScrubSalt,
-		})
 	}
 }
 
@@ -64,6 +68,10 @@ func writeAWGMetricsWithOptions(w io.Writer, iface string, startedAt time.Time, 
 		}
 		_, _ = fmt.Fprintf(w, "awg_peer_rx_bytes{%s} %d\n", labels, peer.RxBytes)
 		_, _ = fmt.Fprintf(w, "awg_peer_tx_bytes{%s} %d\n", labels, peer.TxBytes)
+		_, _ = fmt.Fprintf(w, "awg_peer_persistent_keepalive_seconds{%s} %d\n", labels, peer.PersistentKeepalive)
+		// With server-side persistent keepalive disabled, an idle AWG peer's
+		// handshake age is not a server-side liveness signal; external alerts
+		// must not treat this metric as proof that the peer is offline.
 		_, _ = fmt.Fprintf(w, "awg_peer_last_handshake_time_seconds{%s} %d\n", labels, peer.LastHandshakeSec)
 	}
 }
@@ -99,8 +107,4 @@ func loadMetricsScrubSalt(stateDir, override string) (string, error) {
 		return "", err
 	}
 	return salt, nil
-}
-
-func awgMetricsInterface() string {
-	return "awg1"
 }

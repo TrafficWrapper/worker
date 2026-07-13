@@ -37,24 +37,26 @@ const (
 var version = "dev"
 
 type Config struct {
-	Interface     string  `json:"interface"`
-	Address       string  `json:"address"`
-	ListenPort    int     `json:"listen_port"`
-	PrivateKeyHex string  `json:"private_key_hex"`
-	PublicKey     string  `json:"public_key"`
-	Dialect       Dialect `json:"dialect"`
-	PeerRegistry  string  `json:"peer_registry,omitempty"`
+	Interface       string  `json:"interface"`
+	Address         string  `json:"address"`
+	ListenPort      int     `json:"listen_port"`
+	PrivateKeyHex   string  `json:"private_key_hex"`
+	PublicKey       string  `json:"public_key"`
+	Dialect         Dialect `json:"dialect"`
+	PeerRegistry    string  `json:"peer_registry,omitempty"`
+	ServerKeepalive int     `json:"server_keepalive,omitempty"`
 }
 
 type Dialect = awgdialect.Dialect
 
 type publicConfig struct {
-	Interface  string  `json:"interface"`
-	Address    string  `json:"address"`
-	ListenPort int     `json:"listen_port"`
-	PublicKey  string  `json:"public_key"`
-	Dialect    Dialect `json:"dialect"`
-	Registry   string  `json:"peer_registry"`
+	Interface       string  `json:"interface"`
+	Address         string  `json:"address"`
+	ListenPort      int     `json:"listen_port"`
+	PublicKey       string  `json:"public_key"`
+	Dialect         Dialect `json:"dialect"`
+	Registry        string  `json:"peer_registry"`
+	ServerKeepalive int     `json:"server_keepalive"`
 }
 
 type registryFile struct {
@@ -254,7 +256,7 @@ func deviceConfigLines(cfg Config, peers []restoredPeer) []string {
 	}
 	lines = append(lines, awgdialect.UAPILines(cfg.Dialect)...)
 	for _, peer := range peers {
-		lines = append(lines, serverpeer.PeerUAPILines(peer.PublicKeyHex, peer.PSKHex, peer.AllowedIP, 0)...)
+		lines = append(lines, serverpeer.PeerUAPILines(peer.PublicKeyHex, peer.PSKHex, peer.AllowedIP, cfg.ServerKeepalive)...)
 	}
 	lines = append(lines, "")
 	return lines
@@ -449,12 +451,13 @@ func showConfigCommand(path string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(publicConfig{
-		Interface:  cfg.Interface,
-		Address:    cfg.Address,
-		ListenPort: cfg.ListenPort,
-		PublicKey:  cfg.PublicKey,
-		Dialect:    cfg.Dialect,
-		Registry:   cfg.PeerRegistry,
+		Interface:       cfg.Interface,
+		Address:         cfg.Address,
+		ListenPort:      cfg.ListenPort,
+		PublicKey:       cfg.PublicKey,
+		Dialect:         cfg.Dialect,
+		Registry:        cfg.PeerRegistry,
+		ServerKeepalive: cfg.ServerKeepalive,
 	})
 }
 
@@ -481,6 +484,11 @@ func loadConfig(path string) (Config, error) {
 	if cfg.PeerRegistry == "" {
 		cfg.PeerRegistry = defaultRegistry
 	}
+	serverKeepalive, err := serverKeepaliveFromEnv(cfg.ServerKeepalive)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ServerKeepalive = serverKeepalive
 	return cfg, nil
 }
 
@@ -493,6 +501,9 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.ListenPort < 1025 || cfg.ListenPort > 65535 {
 		return fmt.Errorf("listen_port must be in 1025..65535, got %d", cfg.ListenPort)
+	}
+	if cfg.ServerKeepalive < 0 || cfg.ServerKeepalive > 65535 {
+		return fmt.Errorf("server_keepalive must be in 0..65535, got %d", cfg.ServerKeepalive)
 	}
 	if len(cfg.PrivateKeyHex) != 64 {
 		return fmt.Errorf("private_key_hex must be 64 hex chars")
@@ -574,4 +585,19 @@ func getenv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func serverKeepaliveFromEnv(fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv("AWG_SERVER_KEEPALIVE"))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("AWG_SERVER_KEEPALIVE must be an integer: %w", err)
+	}
+	if parsed < 0 || parsed > 65535 {
+		return 0, fmt.Errorf("AWG_SERVER_KEEPALIVE must be in 0..65535, got %d", parsed)
+	}
+	return parsed, nil
 }

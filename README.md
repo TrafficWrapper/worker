@@ -153,6 +153,7 @@ binaries:
 | `AWG_SUBNET` | Worker AWG subnet for device internal IPs. | Optional | `10.13.13.0/24` | Use a private subnet not colliding with your host. |
 | `AWG_GATEWAY` | AWG gateway address inside `AWG_SUBNET`. | Optional | first host in subnet | `10.13.13.1`. |
 | `AWG_UAPI_SOCKET` | WireGuard/AmneziaWG UAPI socket path. | Optional | `/var/run/wireguard/awg1.sock` | Usually set by Compose. |
+| `AWG_SERVER_KEEPALIVE` | Server-side persistent keepalive policy for every AWG peer. | Optional | `0` | Runtime rollback: set the previous value, then restart both `agent` and `awg-gw`. |
 | `XRAY_CONTAINER_NAME` | Docker container name used by the agent to restart/rewrite Xray after approved-device changes. | Optional | `worker-xray-1` | Compose sets a stable `container_name` with this value; override only if you also change the xray service container name. |
 | `DOCKER_SOCKET` | Docker socket path used by the agent. | Optional | `/var/run/docker.sock` | Compose mounts the host Docker socket. |
 | `DISTRIBUTOR_URL` | Internal URL of the `/tw/` distributor. | Optional | `http://awg-gw:8080/tw` | Keep default for Compose. |
@@ -179,6 +180,13 @@ binaries:
 | `AWG_CLIENT_PRIVATE_KEY` | Overrides smoke client private key. | Optional | generated state value | Secret; use only for smoke debugging. |
 | `AWG_CLIENT_PSK` | Overrides smoke client PSK. | Optional | generated state value | Secret; use only for smoke debugging. |
 | `AWG_CLIENT_IP` | Overrides smoke client internal IP. | Optional | generated state value | Example `10.13.13.250`. |
+
+`agent` and `awg-gw` must be rebuilt and restarted together when deploying a
+new peer-policy implementation. The policy value itself is runtime-configured:
+edit `AWG_SERVER_KEEPALIVE` in `.env` and restart both services to roll back
+without rebuilding. Disabling server keepalive is not proof that idle clients
+remain reachable behind carrier NAT; that requires the separate device test and
+operator confirmation described by the deployment plan.
 
 ## Local Build Checks
 

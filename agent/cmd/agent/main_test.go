@@ -43,6 +43,27 @@ func TestTelemetryHandlerAcceptsApprovedForward(t *testing.T) {
 	}
 }
 
+func TestAWGServerKeepaliveEnvDefaultsAndValidates(t *testing.T) {
+	t.Setenv("AWG_SERVER_KEEPALIVE", "")
+	got, err := getenvIntInRange("AWG_SERVER_KEEPALIVE", 0, 0, 65535)
+	if err != nil || got != 0 {
+		t.Fatalf("default keepalive=%d err=%v, want 0", got, err)
+	}
+	t.Setenv("AWG_SERVER_KEEPALIVE", "17")
+	got, err = getenvIntInRange("AWG_SERVER_KEEPALIVE", 0, 0, 65535)
+	if err != nil || got != 17 {
+		t.Fatalf("configured keepalive=%d err=%v, want 17", got, err)
+	}
+	for _, value := range []string{"invalid", "-1", "65536"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("AWG_SERVER_KEEPALIVE", value)
+			if _, err := getenvIntInRange("AWG_SERVER_KEEPALIVE", 0, 0, 65535); err == nil {
+				t.Fatalf("invalid keepalive %q accepted", value)
+			}
+		})
+	}
+}
+
 func runTelemetryHandlerWithForwardError(t *testing.T, forwardErr error) *httptest.ResponseRecorder {
 	t.Helper()
 	stateDir := t.TempDir()

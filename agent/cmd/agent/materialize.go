@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
@@ -70,13 +71,49 @@ type awgDesiredPeer struct {
 }
 
 type awgPeerConfig struct {
-	PublicKeyHex      string
-	AllowedIPs        []string
-	Endpoint          string
-	RxBytes           uint64
-	TxBytes           uint64
-	LastHandshakeSec  int64
-	LastHandshakeNSec int64
+	PublicKeyHex        string
+	AllowedIPs          []string
+	Endpoint            string
+	PersistentKeepalive int64
+	RxBytes             uint64
+	TxBytes             uint64
+	LastHandshakeSec    int64
+	LastHandshakeNSec   int64
+}
+
+type awgProfilePeerSnapshot struct {
+	Profile    string          `json:"profile"`
+	Interface  string          `json:"interface"`
+	UAPISocket string          `json:"uapi_socket"`
+	Peers      []awgPeerConfig `json:"peers,omitempty"`
+	Error      string          `json:"error,omitempty"`
+}
+
+func collectAWGProfilePeerSnapshots(cfg envConfig) []awgProfilePeerSnapshot {
+	profiles := awgProfiles(cfg)
+	out := make([]awgProfilePeerSnapshot, len(profiles))
+	var wg sync.WaitGroup
+	for i, profile := range profiles {
+		i, profile := i, profile
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			snapshot := awgProfilePeerSnapshot{
+				Profile:    profile.Name,
+				Interface:  profile.Interface,
+				UAPISocket: profile.UAPISocket,
+			}
+			peers, err := listAWGPeerConfigs(profile.UAPISocket)
+			if err != nil {
+				snapshot.Error = err.Error()
+			} else {
+				snapshot.Peers = peers
+			}
+			out[i] = snapshot
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON string) error {
@@ -98,7 +135,7 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 			return fmt.Errorf("write awg peer registry %s: %w", profile.Name, err)
 		}
 		if profile.UAPISocket != "" {
-			if err := syncAWGUAPI(profile.UAPISocket, desiredPeers); err != nil {
+			if err := syncAWGUAPI(profile.UAPISocket, desiredPeers, cfg.AWGServerKeepalive); err != nil {
 				return fmt.Errorf("sync awg uapi %s: %w", profile.Name, err)
 			}
 			log.Printf("awg materialized profile=%s peers=%d via %s", profile.Name, len(desiredPeers), profile.UAPISocket)
@@ -160,16 +197,28 @@ func approvedDevicesFromWorkerConfig(raw string) ([]approvedDevice, error) {
 }
 
 func cachedApprovedDevices(stateDir string) []approvedDevice {
-	raw, err := os.ReadFile(filepath.Join(stateDir, "orch", "worker-config.json"))
-	if err != nil || len(strings.TrimSpace(string(raw))) == 0 {
-		return nil
-	}
-	devices, err := approvedDevicesFromWorkerConfig(string(raw))
+	devices, err := loadCachedApprovedDevices(stateDir)
 	if err != nil {
 		log.Printf("cached approved_devices ignored: %v", err)
 		return nil
 	}
 	return devices
+}
+
+func loadCachedApprovedDevices(stateDir string) ([]approvedDevice, error) {
+	path := filepath.Join(stateDir, "orch", "worker-config.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read cached worker config: %w", err)
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return nil, errors.New("cached worker config is empty")
+	}
+	devices, err := approvedDevicesFromWorkerConfig(string(raw))
+	if err != nil {
+		return nil, fmt.Errorf("parse cached worker config: %w", err)
+	}
+	return devices, nil
 }
 
 func filterUnexpiredApprovedDevices(devices []approvedDevice, now time.Time) []approvedDevice {
@@ -189,6 +238,14 @@ func writeAWGPeerRegistry(cfg envConfig, st stateFile, devices []approvedDevice)
 }
 
 func writeAWGPeerRegistryForProfile(cfg envConfig, st stateFile, devices []approvedDevice, profile awgInboundProfile) ([]awgDesiredPeer, error) {
+	registry, desired := buildAWGPeerRegistryForProfile(st, devices, profile)
+	if err := writeJSONFile(profile.registryPath(cfg.StateDir), registry, 0o600); err != nil {
+		return nil, err
+	}
+	return desired, nil
+}
+
+func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, profile awgInboundProfile) (awgPeerRegistry, []awgDesiredPeer) {
 	now := time.Now().UTC()
 	expires := time.Now().UTC().Add(3650 * 24 * time.Hour)
 	clients := []awgPeerRegistryClient{}
@@ -237,10 +294,7 @@ func writeAWGPeerRegistryForProfile(cfg envConfig, st stateFile, devices []appro
 			AllowedIP: creds.InternalIP,
 		})
 	}
-	if err := writeJSONFile(profile.registryPath(cfg.StateDir), awgPeerRegistry{Clients: clients}, 0o600); err != nil {
-		return nil, err
-	}
-	return desired, nil
+	return awgPeerRegistry{Clients: clients}, desired
 }
 
 func approvedDeviceProfileCreds(device approvedDevice, profileName string) (approvedDeviceAWGProfile, bool) {
@@ -280,7 +334,7 @@ func approvedDeviceExpiry(device approvedDevice) (time.Time, bool) {
 	return parsed.UTC(), true
 }
 
-func syncAWGUAPI(socketPath string, desired []awgDesiredPeer) error {
+func syncAWGUAPI(socketPath string, desired []awgDesiredPeer, keepaliveSec int) error {
 	current, err := listAWGPeerConfigs(socketPath)
 	if err != nil {
 		return err
@@ -311,7 +365,7 @@ func syncAWGUAPI(socketPath string, desired []awgDesiredPeer) error {
 		if _, err := base64KeyToHex(peer.PublicKey); err != nil {
 			continue
 		}
-		if err := addAWGPeer(socketPath, peer); err != nil {
+		if err := addAWGPeer(socketPath, peer, keepaliveSec); err != nil {
 			return err
 		}
 	}
@@ -321,7 +375,113 @@ func syncAWGUAPI(socketPath string, desired []awgDesiredPeer) error {
 	return nil
 }
 
-func addAWGPeer(socketPath string, peer awgDesiredPeer) error {
+func reconcileAWGPeers(cfg envConfig, st stateFile) error {
+	devices, err := loadCachedApprovedDevices(cfg.StateDir)
+	if err != nil {
+		return fmt.Errorf("AWG reconcile skipped by anti-wipe guard: %w", err)
+	}
+	devices = filterUnexpiredApprovedDevices(devices, time.Now().UTC())
+	if orchAppliedSeq(cfg.StateDir) > 0 && len(devices) == 0 {
+		return errors.New("AWG reconcile skipped by anti-wipe guard: applied worker config has no approved devices")
+	}
+
+	type profileResult struct {
+		name string
+		err  error
+	}
+	profiles := awgProfiles(cfg)
+	results := make(chan profileResult, len(profiles))
+	for _, profile := range profiles {
+		profile := profile
+		go func() {
+			results <- profileResult{name: profile.Name, err: reconcileAWGProfile(cfg, st, devices, profile)}
+		}()
+	}
+	var errs []error
+	for range profiles {
+		result := <-results
+		if result.err == nil {
+			continue
+		}
+		log.Printf("awg reconcile profile=%s skipped: %v", result.name, result.err)
+		errs = append(errs, fmt.Errorf("profile %s: %w", result.name, result.err))
+	}
+	return errors.Join(errs...)
+}
+
+func reconcileAWGProfile(cfg envConfig, st stateFile, devices []approvedDevice, profile awgInboundProfile) error {
+	if strings.TrimSpace(profile.UAPISocket) == "" {
+		return errors.New("UAPI socket is not configured")
+	}
+	_, desired := buildAWGPeerRegistryForProfile(st, devices, profile)
+	if len(desired) == 0 {
+		return errors.New("desired peer set is empty; refusing destructive sync")
+	}
+	current, err := listAWGPeerConfigs(profile.UAPISocket)
+	if err != nil {
+		return err
+	}
+	drifted, reason, err := awgPeersNeedSync(current, desired, cfg.AWGServerKeepalive)
+	if err != nil {
+		return err
+	}
+	if !drifted {
+		return nil
+	}
+	awgPeerPolicyDriftTotal.Add(1)
+	log.Printf(
+		"awg peer policy drift profile=%s reason=%s current=%d desired=%d server_keepalive=%d",
+		profile.Name,
+		reason,
+		len(current),
+		len(desired),
+		cfg.AWGServerKeepalive,
+	)
+	if err := syncAWGUAPI(profile.UAPISocket, desired, cfg.AWGServerKeepalive); err != nil {
+		return fmt.Errorf("repair drift: %w", err)
+	}
+	log.Printf("awg peer policy reconciled profile=%s peers=%d", profile.Name, len(desired))
+	return nil
+}
+
+func awgPeersNeedSync(current []awgPeerConfig, desired []awgDesiredPeer, keepaliveSec int) (bool, string, error) {
+	desiredByHex := make(map[string]awgDesiredPeer, len(desired))
+	for _, peer := range desired {
+		hexKey, err := base64KeyToHex(peer.PublicKey)
+		if err != nil {
+			return false, "", fmt.Errorf("desired peer public key: %w", err)
+		}
+		if _, exists := desiredByHex[hexKey]; exists {
+			return false, "", fmt.Errorf("desired peer public key %s is duplicated", hexKey)
+		}
+		desiredByHex[hexKey] = peer
+	}
+	currentByHex := make(map[string]awgPeerConfig, len(current))
+	for _, peer := range current {
+		if _, exists := currentByHex[peer.PublicKeyHex]; exists {
+			return true, "duplicate current peer", nil
+		}
+		currentByHex[peer.PublicKeyHex] = peer
+	}
+	if len(currentByHex) != len(desiredByHex) {
+		return true, "peer set differs", nil
+	}
+	for hexKey, wanted := range desiredByHex {
+		peer, ok := currentByHex[hexKey]
+		if !ok {
+			return true, "desired peer is missing", nil
+		}
+		if peer.PersistentKeepalive != int64(keepaliveSec) {
+			return true, "persistent keepalive differs", nil
+		}
+		if len(peer.AllowedIPs) != 1 || strings.TrimSpace(peer.AllowedIPs[0]) != strings.TrimSpace(wanted.AllowedIP) {
+			return true, "allowed IP differs", nil
+		}
+	}
+	return false, "", nil
+}
+
+func addAWGPeer(socketPath string, peer awgDesiredPeer, keepaliveSec int) error {
 	pubHex, err := base64KeyToHex(peer.PublicKey)
 	if err != nil {
 		return fmt.Errorf("wg public key: %w", err)
@@ -331,7 +491,7 @@ func addAWGPeer(socketPath string, peer awgDesiredPeer) error {
 		return fmt.Errorf("psk2: %w", err)
 	}
 	lines := []string{"set=1"}
-	lines = append(lines, serverpeer.PeerUAPILines(pubHex, pskHex, peer.AllowedIP, 0)...)
+	lines = append(lines, serverpeer.PeerUAPILines(pubHex, pskHex, peer.AllowedIP, keepaliveSec)...)
 	return writeUAPI(socketPath, append(lines, "", ""))
 }
 
@@ -385,8 +545,16 @@ func listAWGPeerConfigs(socketPath string) ([]awgPeerConfig, error) {
 			if err != nil {
 				return nil, err
 			}
-			peers = append(peers, awgPeerConfig{PublicKeyHex: normalized})
+			peers = append(peers, awgPeerConfig{PublicKeyHex: normalized, PersistentKeepalive: -1})
 			current = len(peers) - 1
+		case "persistent_keepalive_interval":
+			if current >= 0 {
+				parsed, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					return nil, fmt.Errorf("parse persistent keepalive %q: %w", value, err)
+				}
+				peers[current].PersistentKeepalive = parsed
+			}
 		case "allowed_ip":
 			if current >= 0 {
 				peers[current].AllowedIPs = append(peers[current].AllowedIPs, value)

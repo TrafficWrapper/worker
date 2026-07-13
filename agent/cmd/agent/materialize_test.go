@@ -9,7 +9,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,7 +213,7 @@ func TestSyncAWGUAPISkipsRemovalWhenDesiredSetIsIncomplete(t *testing.T) {
 		PublicKey: validKey,
 		PSK2:      keyB64(2),
 		AllowedIP: "10.13.13.11/32",
-	}})
+	}}, 0)
 	if err == nil {
 		t.Fatal("bad desired key accepted")
 	}
@@ -241,7 +244,7 @@ func TestSyncAWGUAPIRemovesStalePeerWhenDesiredSetIsComplete(t *testing.T) {
 		"",
 		"",
 	})
-	if err := syncAWGUAPI(socketPath, nil); err != nil {
+	if err := syncAWGUAPI(socketPath, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	var seenRemove bool
@@ -262,7 +265,7 @@ func TestAddAWGPeerDisablesServerSideKeepalive(t *testing.T) {
 		{PublicKey: keyB64(11), PSK2: keyB64(12), AllowedIP: "10.13.13.11/32"},
 	}
 	for _, peer := range peers {
-		if err := addAWGPeer(socketPath, peer); err != nil {
+		if err := addAWGPeer(socketPath, peer, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -406,6 +409,371 @@ func collectUAPIRequests(requests <-chan string) []string {
 		case <-timer.C:
 			return out
 		}
+	}
+}
+
+type statefulFakeUAPI struct {
+	socketPath string
+	listener   net.Listener
+	done       chan struct{}
+
+	mu       sync.Mutex
+	peers    map[string]awgPeerConfig
+	requests []string
+	setCount int
+}
+
+func startStatefulFakeUAPI(t *testing.T, peers []awgPeerConfig) *statefulFakeUAPI {
+	t.Helper()
+	socketPath := filepath.Join(t.TempDir(), "awg.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &statefulFakeUAPI{
+		socketPath: socketPath,
+		listener:   ln,
+		done:       make(chan struct{}),
+		peers:      make(map[string]awgPeerConfig, len(peers)),
+	}
+	for _, peer := range peers {
+		fake.peers[peer.PublicKeyHex] = peer
+	}
+	go fake.serve()
+	t.Cleanup(func() {
+		_ = fake.listener.Close()
+		<-fake.done
+	})
+	return fake
+}
+
+func (f *statefulFakeUAPI) serve() {
+	defer close(f.done)
+	for {
+		conn, err := f.listener.Accept()
+		if err != nil {
+			return
+		}
+		f.handle(conn)
+	}
+}
+
+func (f *statefulFakeUAPI) handle(conn net.Conn) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	var lines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			break
+		}
+		lines = append(lines, line)
+	}
+	request := strings.Join(lines, "\n")
+	f.mu.Lock()
+	f.requests = append(f.requests, request)
+	if len(lines) > 0 && lines[0] == "get=1" {
+		response := f.getResponseLocked()
+		f.mu.Unlock()
+		_, _ = io.WriteString(conn, response)
+		return
+	}
+	if len(lines) > 0 && lines[0] == "set=1" {
+		f.setCount++
+		f.applySetLocked(lines[1:])
+	}
+	f.mu.Unlock()
+	_, _ = io.WriteString(conn, "errno=0\n\n")
+}
+
+func (f *statefulFakeUAPI) getResponseLocked() string {
+	keys := make([]string, 0, len(f.peers))
+	for key := range f.peers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	lines := make([]string, 0, len(keys)*3+2)
+	for _, key := range keys {
+		peer := f.peers[key]
+		lines = append(lines,
+			"public_key="+peer.PublicKeyHex,
+			fmt.Sprintf("persistent_keepalive_interval=%d", peer.PersistentKeepalive),
+		)
+		for _, allowedIP := range peer.AllowedIPs {
+			lines = append(lines, "allowed_ip="+allowedIP)
+		}
+	}
+	lines = append(lines, "errno=0", "", "")
+	return strings.Join(lines, "\n")
+}
+
+func (f *statefulFakeUAPI) applySetLocked(lines []string) {
+	var key string
+	for _, line := range lines {
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch name {
+		case "public_key":
+			key = value
+			if _, ok := f.peers[key]; !ok {
+				f.peers[key] = awgPeerConfig{PublicKeyHex: key, PersistentKeepalive: -1}
+			}
+		case "remove":
+			if key != "" && value == "true" {
+				delete(f.peers, key)
+			}
+		case "persistent_keepalive_interval":
+			if key == "" {
+				continue
+			}
+			peer := f.peers[key]
+			peer.PersistentKeepalive, _ = strconv.ParseInt(value, 10, 64)
+			f.peers[key] = peer
+		case "replace_allowed_ips":
+			if key != "" && value == "true" {
+				peer := f.peers[key]
+				peer.AllowedIPs = nil
+				f.peers[key] = peer
+			}
+		case "allowed_ip":
+			if key == "" {
+				continue
+			}
+			peer := f.peers[key]
+			peer.AllowedIPs = append(peer.AllowedIPs, value)
+			f.peers[key] = peer
+		}
+	}
+}
+
+func (f *statefulFakeUAPI) peer(publicKeyHex string) (awgPeerConfig, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	peer, ok := f.peers[publicKeyHex]
+	return peer, ok
+}
+
+func (f *statefulFakeUAPI) counts() (requests, sets int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests), f.setCount
+}
+
+func writeCachedApprovedDevicesForTest(t *testing.T, stateDir string, devices []approvedDevice, appliedSeq int64) {
+	t.Helper()
+	var doc workerConfigDocument
+	doc.DesiredState.ApprovedDevices = devices
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "orch"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "orch", "worker-config.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveOrchState(stateDir, orchState{AppliedSeq: appliedSeq}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileAWGPeersRepairsKeepaliveDriftAcrossProfilesWithoutExtraWrites(t *testing.T) {
+	profilePublic := keyB64(21)
+	profilePublicHex, err := base64KeyToHex(profilePublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := startStatefulFakeUAPI(t, []awgPeerConfig{{
+		PublicKeyHex:        profilePublicHex,
+		AllowedIPs:          []string{"10.44.0.10/32"},
+		PersistentKeepalive: 25,
+	}})
+	stateDir := t.TempDir()
+	device := approvedDevice{
+		DeviceID:     "device-a",
+		RealityUUID:  "4fad2182-6de3-4407-bf8f-d8c688160ce6",
+		AWGPublicKey: keyB64(5),
+		InternalIP:   "10.13.13.10/32",
+		PSK2:         keyB64(6),
+		Status:       "approved",
+		AWGProfiles: map[string]approvedDeviceAWGProfile{
+			"next": {AWGPublicKey: profilePublic, InternalIP: "10.44.0.10/32", PSK2: keyB64(22)},
+		},
+	}
+	writeCachedApprovedDevicesForTest(t, stateDir, []approvedDevice{device}, 7)
+	marker := filepath.Join(stateDir, "xray", "restart-pending")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("pending\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := envConfig{
+		StateDir:           stateDir,
+		AWGServerKeepalive: 0,
+		AWGProfiles: []awgInboundProfile{
+			{Name: "awg", Interface: "awg1", UAPISocket: filepath.Join(stateDir, "missing.sock")},
+			{Name: "next", Interface: "awg2", UAPISocket: fake.socketPath},
+		},
+	}
+	st := stateFile{AWG: awgState{SmokePublic: keyB64(1), SmokePSK: keyB64(2), SmokeIP: "10.13.13.2/32"}}
+	awgPeerPolicyDriftTotal.Store(0)
+	if err := reconcileAWGPeers(cfg, st); err == nil || !strings.Contains(err.Error(), "profile awg") {
+		t.Fatalf("unavailable base profile was not reported: %v", err)
+	}
+	peer, ok := fake.peer(profilePublicHex)
+	if !ok || peer.PersistentKeepalive != 0 {
+		t.Fatalf("keepalive drift was not repaired: peer=%+v ok=%t", peer, ok)
+	}
+	_, setCount := fake.counts()
+	if setCount != 1 {
+		t.Fatalf("UAPI set count=%d want 1 after drift repair", setCount)
+	}
+	if got := awgPeerPolicyDriftTotal.Load(); got != 1 {
+		t.Fatalf("drift counter=%d want 1", got)
+	}
+	if err := reconcileAWGPeers(cfg, st); err == nil || !strings.Contains(err.Error(), "profile awg") {
+		t.Fatalf("unavailable base profile was not reported on second pass: %v", err)
+	}
+	_, secondSetCount := fake.counts()
+	if secondSetCount != setCount {
+		t.Fatalf("drift-free pass wrote UAPI: before=%d after=%d", setCount, secondSetCount)
+	}
+	if !fileExists(marker) {
+		t.Fatal("AWG-only reconcile touched Xray restart state")
+	}
+}
+
+func TestReconcileAWGPeersAntiWipeRejectsEmptyAppliedDesiredState(t *testing.T) {
+	emptyConfig := ""
+	malformedConfig := "{"
+	validEmptyConfig := `{"desired_state":{"approved_devices":[]}}`
+	tests := []struct {
+		name   string
+		config *string
+	}{
+		{name: "missing"},
+		{name: "empty", config: &emptyConfig},
+		{name: "malformed", config: &malformedConfig},
+		{name: "empty desired", config: &validEmptyConfig},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			publicHex := strings.Repeat("ab", 32)
+			fake := startStatefulFakeUAPI(t, []awgPeerConfig{{
+				PublicKeyHex:        publicHex,
+				AllowedIPs:          []string{"10.13.13.10/32"},
+				PersistentKeepalive: 25,
+			}})
+			stateDir := t.TempDir()
+			if err := saveOrchState(stateDir, orchState{AppliedSeq: 3}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.config != nil {
+				if err := os.WriteFile(filepath.Join(stateDir, "orch", "worker-config.json"), []byte(*tt.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := envConfig{
+				StateDir:           stateDir,
+				AWGUAPISocket:      fake.socketPath,
+				AWGServerKeepalive: 0,
+			}
+			st := stateFile{AWG: awgState{SmokePublic: keyB64(1), SmokePSK: keyB64(2), SmokeIP: "10.13.13.2/32"}}
+			err := reconcileAWGPeers(cfg, st)
+			if err == nil || !strings.Contains(err.Error(), "anti-wipe guard") {
+				t.Fatalf("unsafe cached desired state was not rejected: %v", err)
+			}
+			requests, sets := fake.counts()
+			if requests != 0 || sets != 0 {
+				t.Fatalf("anti-wipe guard touched UAPI: requests=%d sets=%d", requests, sets)
+			}
+			if peer, ok := fake.peer(publicHex); !ok || peer.PersistentKeepalive != 25 {
+				t.Fatalf("anti-wipe guard changed live peer: peer=%+v ok=%t", peer, ok)
+			}
+		})
+	}
+}
+
+func TestRenderAWGPropagatesServerKeepalivePolicy(t *testing.T) {
+	cfg := envConfig{
+		StateDir:           t.TempDir(),
+		AWGPort:            51888,
+		AWGSubnet:          "10.13.13.0/24",
+		AWGGateway:         "10.13.13.1",
+		AWGUAPISocket:      "/var/run/wireguard/awg1.sock",
+		AWGServerKeepalive: 17,
+	}
+	st := stateFile{AWG: awgState{
+		SmokePublic:   keyB64(1),
+		SmokePSK:      keyB64(2),
+		SmokeIP:       "10.13.13.2/32",
+		PublicKey:     keyB64(3),
+		PrivateKey:    keyB64(4),
+		PrivateKeyHex: strings.Repeat("0", 64),
+	}}
+	if err := renderAWG(cfg, st); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(defaultAWGInboundProfile(cfg).configPath(cfg.StateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered struct {
+		ServerKeepalive int `json:"server_keepalive"`
+	}
+	if err := json.Unmarshal(raw, &rendered); err != nil {
+		t.Fatal(err)
+	}
+	if rendered.ServerKeepalive != 17 {
+		t.Fatalf("rendered server_keepalive=%d want 17: %s", rendered.ServerKeepalive, raw)
+	}
+}
+
+func TestRenderAWGAntiWipePreservesRegistryWhenAppliedConfigIsUnavailable(t *testing.T) {
+	cfg := envConfig{
+		StateDir:      t.TempDir(),
+		AWGPort:       51888,
+		AWGSubnet:     "10.13.13.0/24",
+		AWGGateway:    "10.13.13.1",
+		AWGUAPISocket: "/var/run/wireguard/awg1.sock",
+	}
+	if err := saveOrchState(cfg.StateDir, orchState{AppliedSeq: 4}); err != nil {
+		t.Fatal(err)
+	}
+	profile := defaultAWGInboundProfile(cfg)
+	registryPath := profile.registryPath(cfg.StateDir)
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = `{"clients":[{"wg_public_key":"preserve-me"}]}`
+	if err := os.WriteFile(registryPath, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := stateFile{AWG: awgState{
+		SmokePublic:   keyB64(1),
+		SmokePSK:      keyB64(2),
+		SmokeIP:       "10.13.13.2/32",
+		PublicKey:     keyB64(3),
+		PrivateKey:    keyB64(4),
+		PrivateKeyHex: strings.Repeat("0", 64),
+	}}
+	if err := renderAWG(cfg, st); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != sentinel {
+		t.Fatalf("anti-wipe render replaced registry:\n%s", raw)
 	}
 }
 

@@ -205,6 +205,9 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile) {
 				log.Printf("orch nudge heartbeat desired=%d applied=%d", nudge.DesiredSeq, state.AppliedSeq)
 			}
 			reportOrchAck(client, cfg, st, state.WorkerID, state.AppliedSeq)
+			if err := reconcileAWGPeers(cfg, st); err != nil {
+				log.Printf("awg periodic reconcile incomplete: %v", err)
+			}
 			continue
 		}
 		seq, clientSeq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)

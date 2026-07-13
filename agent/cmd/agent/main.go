@@ -81,6 +81,7 @@ type envConfig struct {
 	AWGSubnet              string
 	AWGGateway             string
 	AWGUAPISocket          string
+	AWGServerKeepalive     int
 	AWGProfiles            []awgInboundProfile
 	MetricsScrubPeerLabels bool
 	MetricsScrubSalt       string
@@ -148,11 +149,7 @@ func main() {
 			fatal(err)
 		}
 	case "show-awg-peers":
-		peers, err := listAWGPeerConfigs(cfg.AWGUAPISocket)
-		if err != nil {
-			fatal(err)
-		}
-		_ = encodeJSON(os.Stdout, peers)
+		_ = encodeJSON(os.Stdout, collectAWGProfilePeerSnapshots(cfg))
 	default:
 		fatal(fmt.Errorf("unknown command %q", cmd))
 	}
@@ -162,6 +159,12 @@ func run(cfg envConfig) error {
 	st, err := bootstrap(cfg)
 	if err != nil {
 		return err
+	}
+	if cfg.OrchURL == "" {
+		log.Printf("awg reconcile standalone mode: startup pass is best-effort and no periodic orchestrator pass will run")
+	}
+	if err := reconcileAWGPeers(cfg, st); err != nil {
+		log.Printf("awg startup reconcile incomplete: %v", err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -284,6 +287,10 @@ func readEnv() (envConfig, error) {
 	if err != nil {
 		return envConfig{}, err
 	}
+	serverKeepalive, err := getenvIntInRange("AWG_SERVER_KEEPALIVE", 0, 0, 65535)
+	if err != nil {
+		return envConfig{}, err
+	}
 	cfg := envConfig{
 		StateDir:               getenv("WORKER_STATE_DIR", stateDirDefault),
 		XrayPort:               getenvInt("XRAY_PORT", 2053),
@@ -291,6 +298,7 @@ func readEnv() (envConfig, error) {
 		AWGSubnet:              subnet,
 		AWGGateway:             getenv("AWG_GATEWAY", gateway),
 		AWGUAPISocket:          getenv("AWG_UAPI_SOCKET", "/var/run/wireguard/awg1.sock"),
+		AWGServerKeepalive:     serverKeepalive,
 		MetricsScrubPeerLabels: getenv("TW_METRICS_SCRUB_PEER_LABELS", "0") == "1",
 		XrayContainer:          os.Getenv("XRAY_CONTAINER_NAME"),
 		DockerSocket:           getenv("DOCKER_SOCKET", "/var/run/docker.sock"),
@@ -866,23 +874,40 @@ func clearXrayRestartPending(cfg envConfig) error {
 }
 
 func renderAWG(cfg envConfig, st stateFile) error {
-	devices := filterUnexpiredApprovedDevices(cachedApprovedDevices(cfg.StateDir), time.Now().UTC())
+	devices, cachedErr := loadCachedApprovedDevices(cfg.StateDir)
+	skipRegistryWrite := false
+	if cachedErr != nil {
+		if orchAppliedSeq(cfg.StateDir) > 0 {
+			log.Printf("awg registry render skipped by anti-wipe guard: %v", cachedErr)
+			skipRegistryWrite = true
+		}
+		devices = nil
+	} else {
+		devices = filterUnexpiredApprovedDevices(devices, time.Now().UTC())
+		if orchAppliedSeq(cfg.StateDir) > 0 && len(devices) == 0 {
+			log.Printf("awg registry render skipped by anti-wipe guard: applied worker config has no approved devices")
+			skipRegistryWrite = true
+		}
+	}
 	for _, profile := range awgProfiles(cfg) {
 		addr := profile.Gateway + "/" + prefixLen(profile.Subnet)
 		awgCfg := map[string]any{
-			"interface":       profile.Interface,
-			"address":         addr,
-			"listen_port":     profile.ListenPort,
-			"private_key_hex": st.AWG.PrivateKeyHex,
-			"public_key":      st.AWG.PublicKey,
-			"dialect":         st.Dialect,
-			"peer_registry":   profile.registryPath(cfg.StateDir),
+			"interface":        profile.Interface,
+			"address":          addr,
+			"listen_port":      profile.ListenPort,
+			"private_key_hex":  st.AWG.PrivateKeyHex,
+			"public_key":       st.AWG.PublicKey,
+			"dialect":          st.Dialect,
+			"peer_registry":    profile.registryPath(cfg.StateDir),
+			"server_keepalive": cfg.AWGServerKeepalive,
 		}
 		if err := writeJSONFile(profile.configPath(cfg.StateDir), awgCfg, 0o600); err != nil {
 			return err
 		}
-		if _, err := writeAWGPeerRegistryForProfile(cfg, st, devices, profile); err != nil {
-			return err
+		if !skipRegistryWrite {
+			if _, err := writeAWGPeerRegistryForProfile(cfg, st, devices, profile); err != nil {
+				return err
+			}
 		}
 	}
 	return writeFile(filepath.Join(cfg.StateDir, "smoke", "awg-peer.conf"), []byte(smokePeerConfig(cfg, st)), 0o600)
@@ -1318,6 +1343,21 @@ func getenvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvIntInRange(key string, fallback, minValue, maxValue int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", key, err)
+	}
+	if parsed < minValue || parsed > maxValue {
+		return 0, fmt.Errorf("%s must be in %d..%d, got %d", key, minValue, maxValue, parsed)
+	}
+	return parsed, nil
 }
 
 func writeJSON(w http.ResponseWriter, value any) {

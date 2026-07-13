@@ -23,6 +23,7 @@ import (
 
 	"github.com/TrafficWrapper/worker/core/awg/device"
 	awgdialect "github.com/TrafficWrapper/worker/core/awg/dialect"
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 const (
@@ -253,13 +254,7 @@ func deviceConfigLines(cfg Config, peers []restoredPeer) []string {
 	}
 	lines = append(lines, awgdialect.UAPILines(cfg.Dialect)...)
 	for _, peer := range peers {
-		lines = append(lines,
-			"public_key="+peer.PublicKeyHex,
-			"preshared_key="+peer.PSKHex,
-			"persistent_keepalive_interval=0",
-			"replace_allowed_ips=true",
-			"allowed_ip="+peer.AllowedIP,
-		)
+		lines = append(lines, serverpeer.PeerUAPILines(peer.PublicKeyHex, peer.PSKHex, peer.AllowedIP, 0)...)
 	}
 	lines = append(lines, "")
 	return lines

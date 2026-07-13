@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 const (
@@ -328,16 +330,9 @@ func addAWGPeer(socketPath string, peer awgDesiredPeer) error {
 	if err != nil {
 		return fmt.Errorf("psk2: %w", err)
 	}
-	return writeUAPI(socketPath, []string{
-		"set=1",
-		"public_key=" + pubHex,
-		"preshared_key=" + pskHex,
-		"persistent_keepalive_interval=0",
-		"replace_allowed_ips=true",
-		"allowed_ip=" + peer.AllowedIP,
-		"",
-		"",
-	})
+	lines := []string{"set=1"}
+	lines = append(lines, serverpeer.PeerUAPILines(pubHex, pskHex, peer.AllowedIP, 0)...)
+	return writeUAPI(socketPath, append(lines, "", ""))
 }
 
 func removeAWGPeerHex(socketPath, pubHex string) error {

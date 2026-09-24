@@ -7,8 +7,8 @@ Go transport core used by TrafficWrapper worker-side binaries.
 Build and test from this `core/` directory:
 
 ```sh
-docker run --rm -v "$PWD":/src -w /src golang:1.24-bookworm go test ./...
-docker run --rm -v "$PWD":/src -w /src golang:1.24-bookworm go build ./...
+docker run --rm -v "$PWD":/src -w /src golang:1.27-bookworm go test ./...
+docker run --rm -v "$PWD":/src -w /src golang:1.27-bookworm go build ./...
 ```
 
 `awg_src` is copied into `core/awg/device` without edits. Missing files from the
@@ -20,7 +20,7 @@ come from the dependency `github.com/amnezia-vpn/amneziawg-go` pseudo-version
 `v0.2.13-0.20250623202557-6a7c878409f3`, commit
 `6a7c878409f32dc39a82bc597766c81304ab9840`. This revision removes the obsolete
 `PacketBuffer.IsNil()` call and builds natively with gVisor
-`v0.0.0-20250503011706-39ed1f5ac29c` using Go 1.24.
+`v0.0.0-20250503011706-39ed1f5ac29c` using Go 1.27.
 
 ## Client API notes
 

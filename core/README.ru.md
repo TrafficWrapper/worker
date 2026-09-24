@@ -7,8 +7,8 @@ Go transport core, используемый worker-side binaries TrafficWrapper.
 Собрать и протестировать из этой директории `core/`:
 
 ```sh
-docker run --rm -v "$PWD":/src -w /src golang:1.24-bookworm go test ./...
-docker run --rm -v "$PWD":/src -w /src golang:1.24-bookworm go build ./...
+docker run --rm -v "$PWD":/src -w /src golang:1.27-bookworm go test ./...
+docker run --rm -v "$PWD":/src -w /src golang:1.27-bookworm go build ./...
 ```
 
 `awg_src` копируется в `core/awg/device` без правок. Недостающие файлы из того
@@ -20,7 +20,7 @@ Imported packages `conn`, `tun`, `ipc`, `ratelimiter`, `tai64n` и `rwcancel`
 `v0.2.13-0.20250623202557-6a7c878409f3`, commit
 `6a7c878409f32dc39a82bc597766c81304ab9840`. Эта revision удаляет obsolete
 `PacketBuffer.IsNil()` call и нативно собирается с gVisor
-`v0.0.0-20250503011706-39ed1f5ac29c` на Go 1.24.
+`v0.0.0-20250503011706-39ed1f5ac29c` на Go 1.27.
 
 ## Замечания по клиентскому API
 

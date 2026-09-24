@@ -104,6 +104,8 @@ type envConfig struct {
 	XHTTPExtraJSON         string
 	EgressIP               string
 	PublicAddress          string
+	PublicAddressV6        string
+	DNSEnabled             bool
 	DistributorURL         string
 	EnrollToken            string
 	Capacity               int
@@ -410,6 +412,10 @@ func readEnv() (envConfig, error) {
 	}
 	cfg.AllowPrivateEgress = getenv("WORKER_ALLOW_PRIVATE_EGRESS", "0") == "1"
 	cfg.RealityProbeAddr = getenv("REALITY_PROBE_ADDR", defaultRealityAddr)
+	cfg.DNSEnabled = getenv("WORKER_DNS", "0") == "1"
+	if cfg.PublicAddressV6, err = publicAddressV6(getenv("PUBLIC_ADDRESS_V6", "")); err != nil {
+		return envConfig{}, err
+	}
 	if cfg.RealityProfiles, err = parseRealityProfiles(os.Getenv("REALITY_INBOUNDS")); err != nil {
 		return envConfig{}, err
 	}
@@ -1271,6 +1277,7 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 		payload := map[string]any{
 			"name":        profile.Name,
 			"address":     cfg.PublicAddress,
+			"address_v6":  cfg.PublicAddressV6,
 			"port":        profile.PublicPort,
 			"network":     profile.Network,
 			"server_name": cfg.CamouflageDomain,
@@ -1326,6 +1333,7 @@ func awgSelfDescribe(cfg envConfig, st stateFile, profile awgInboundProfile) map
 		"name":              profile.Name,
 		"address":           cfg.PublicAddress,
 		"endpoint":          net.JoinHostPort(cfg.PublicAddress, strconv.Itoa(profile.PublicPort)),
+		"endpoint_v6":       endpointV6(cfg, profile.PublicPort),
 		"public_key":        st.AWG.PublicKey,
 		"server_public":     st.AWG.PublicKey,
 		"server_public_key": st.AWG.PublicKey,
@@ -1334,6 +1342,7 @@ func awgSelfDescribe(cfg envConfig, st stateFile, profile awgInboundProfile) map
 		"interface":         profile.Interface,
 		"subnet":            profile.Subnet,
 		"gateway":           profile.Gateway,
+		"dns":               awgProfileDNS(cfg, profile),
 		"min_version_code":  profile.MinVersionCode,
 		"dialect":           profileDialect(st, profile),
 		"dialect_id":        profileDialectID(st, profile),
@@ -1828,4 +1837,49 @@ func profileDialectID(st stateFile, profile awgInboundProfile) string {
 		}
 	}
 	return st.DialectID
+}
+
+// publicAddressV6 validates PUBLIC_ADDRESS_V6; "auto" asks an IPv6-only echo
+// service. Docker publishes ports on IPv6 too, so an IPv6 endpoint works as
+// soon as the host has a global address, and it often stays reachable when
+// the provider's IPv4 range is blocked.
+func publicAddressV6(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	switch value {
+	case "":
+		return "", nil
+	case "auto":
+		return detectPublicIPv6(), nil
+	}
+	addr, err := netip.ParseAddr(strings.Trim(value, "[]"))
+	if err != nil || !addr.Is6() || addr.Is4In6() || !isPublicIP(addr.String()) {
+		return "", fmt.Errorf("PUBLIC_ADDRESS_V6 must be a global IPv6 address or auto, got %q", value)
+	}
+	return addr.String(), nil
+}
+
+var ipv6EchoURL = "https://api6.ipify.org"
+
+func detectPublicIPv6() string {
+	ip := fetchEchoIP(ipv6EchoURL)
+	if addr, err := netip.ParseAddr(ip); err == nil && addr.Is6() && !addr.Is4In6() {
+		return addr.String()
+	}
+	return ""
+}
+
+// awgProfileDNS advertises the in-tunnel resolver (the dns compose profile,
+// which runs in the base awg-gw network namespace).
+func awgProfileDNS(cfg envConfig, profile awgInboundProfile) []string {
+	if !cfg.DNSEnabled || !profile.isBase() {
+		return []string{}
+	}
+	return []string{profile.Gateway}
+}
+
+func endpointV6(cfg envConfig, port int) string {
+	if cfg.PublicAddressV6 == "" {
+		return ""
+	}
+	return net.JoinHostPort(cfg.PublicAddressV6, strconv.Itoa(port))
 }

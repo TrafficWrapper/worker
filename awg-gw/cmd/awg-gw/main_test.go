@@ -247,3 +247,41 @@ func TestAWGLogLevelDefaultsToErrors(t *testing.T) {
 		t.Fatal("unknown level accepted")
 	}
 }
+
+func TestRateLimitsFromRegistryBuildTCRules(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	registry := `{"clients":[
+		{"wg_public_key":"` + key + `","internal_ip":"10.13.13.10/32","psk2":"` + key + `","download_mbps":20,"upload_mbps":5},
+		{"wg_public_key":"` + key + `","internal_ip":"10.13.13.11/32","psk2":"` + key + `"},
+		{"wg_public_key":"` + key + `","internal_ip":"10.13.13.12/32","psk2":"` + key + `","download_mbps":50,"expires_at":"2000-01-01T00:00:00Z"}
+	]}`
+	path := filepath.Join(t.TempDir(), "peers.json")
+	if err := os.WriteFile(path, []byte(registry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	limits, err := loadRateLimits(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limits) != 1 || limits[0].IP != "10.13.13.10" || limits[0].DownloadMbps != 20 || limits[0].UploadMbps != 5 {
+		t.Fatalf("limits=%+v", limits)
+	}
+	var all []string
+	for _, args := range rateLimitCommands("awg1", limits) {
+		all = append(all, strings.Join(args, " "))
+	}
+	joined := strings.Join(all, "\n")
+	for _, want := range []string{
+		"tc qdisc add dev awg1 root handle 1: htb",
+		"tc class add dev awg1 parent 1: classid 1:10 htb rate 20mbit ceil 20mbit",
+		"match ip dst 10.13.13.10/32 flowid 1:10",
+		"match ip src 10.13.13.10/32 police rate 5mbit burst 32768b drop",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in:\n%s", want, joined)
+		}
+	}
+	if cleared := rateLimitCommands("awg1", nil); len(cleared) != 2 {
+		t.Fatalf("no limits must only clear shaping: %v", cleared)
+	}
+}

@@ -46,3 +46,11 @@ let the orchestrator move clients to it using `awg_profiles` in self-describe,
 then remove the old profile. `WORKER_DIALECT_WIDE=1` draws junk-packet
 parameters (Jc, Jmin, Jmax) from the wider ranges; enable it only after every
 client accepts them.
+
+## Per-device AWG rate limits
+
+`desired_state.approved_devices[].limits.download_mbps` / `upload_mbps` are
+written into the AWG peer registry. `awg-gw` re-reads the registry every 30s
+and, when the limits change, rebuilds `tc` shaping on the tunnel interface: an
+HTB class per limited client for download and an ingress policer for upload.
+REALITY clients are not rate limited (Xray has no per-user shaping).

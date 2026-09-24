@@ -24,6 +24,9 @@ import (
 	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
+// maxRateMbps bounds per-device AWG rate limits (0 means unlimited).
+const maxRateMbps = 100000
+
 var realityUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type approvedDevice struct {
@@ -37,7 +40,9 @@ type approvedDevice struct {
 	Status       string                              `json:"status"`
 	ExpiresAt    string                              `json:"expires_at,omitempty"`
 	Limits       struct {
-		ExpiresAt *string `json:"expires_at,omitempty"`
+		ExpiresAt    *string `json:"expires_at,omitempty"`
+		DownloadMbps int     `json:"download_mbps,omitempty"`
+		UploadMbps   int     `json:"upload_mbps,omitempty"`
 	} `json:"limits,omitempty"`
 }
 
@@ -58,10 +63,12 @@ type awgPeerRegistry struct {
 }
 
 type awgPeerRegistryClient struct {
-	WGPublicKey string    `json:"wg_public_key"`
-	InternalIP  string    `json:"internal_ip"`
-	PSK2        string    `json:"psk2"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	WGPublicKey  string    `json:"wg_public_key"`
+	InternalIP   string    `json:"internal_ip"`
+	PSK2         string    `json:"psk2"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	DownloadMbps int       `json:"download_mbps,omitempty"`
+	UploadMbps   int       `json:"upload_mbps,omitempty"`
 }
 
 type awgDesiredPeer struct {
@@ -179,6 +186,9 @@ func normalizeApprovedDevice(device approvedDevice) (approvedDevice, error) {
 	device.RealityUUID = strings.TrimSpace(device.RealityUUID)
 	if !realityUUIDPattern.MatchString(device.RealityUUID) {
 		return approvedDevice{}, errors.New("reality_uuid is not a UUID")
+	}
+	if device.Limits.DownloadMbps < 0 || device.Limits.UploadMbps < 0 || device.Limits.DownloadMbps > maxRateMbps || device.Limits.UploadMbps > maxRateMbps {
+		return approvedDevice{}, fmt.Errorf("limits must be in 0..%d Mbps", maxRateMbps)
 	}
 	device.RealityFlow = strings.TrimSpace(device.RealityFlow)
 	if err := validRealityFlow(device.RealityFlow); err != nil {
@@ -363,10 +373,12 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 		seen[creds.AWGPublicKey] = struct{}{}
 		seenIPs[creds.InternalIP] = struct{}{}
 		clients = append(clients, awgPeerRegistryClient{
-			WGPublicKey: creds.AWGPublicKey,
-			InternalIP:  creds.InternalIP,
-			PSK2:        creds.PSK2,
-			ExpiresAt:   deviceExpires,
+			WGPublicKey:  creds.AWGPublicKey,
+			InternalIP:   creds.InternalIP,
+			PSK2:         creds.PSK2,
+			ExpiresAt:    deviceExpires,
+			DownloadMbps: device.Limits.DownloadMbps,
+			UploadMbps:   device.Limits.UploadMbps,
 		})
 		desired = append(desired, awgDesiredPeer{
 			PublicKey: creds.AWGPublicKey,

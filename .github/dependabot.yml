@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories:
+      - /agent
+      - /awg-gw
+      - /awg-smoke
+      - /core
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directories:
+      - /agent
+      - /awg-gw
+      - /awg-smoke
+      - /distributor
+      - /xray
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

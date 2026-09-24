@@ -138,7 +138,11 @@ func runGateway(path string) error {
 		return err
 	}
 
-	logger := device.NewLogger(device.LogLevelVerbose, fmt.Sprintf("(%s) ", cfg.Interface))
+	logLevel, err := awgLogLevel(os.Getenv("AWG_LOG_LEVEL"))
+	if err != nil {
+		return err
+	}
+	logger := device.NewLogger(logLevel, fmt.Sprintf("(%s) ", cfg.Interface))
 	fmt.Printf("TrafficWrapper awg-gw version=%s\n", version)
 	fmt.Printf("mode=run interface=%s address=%s listen_port=%d\n", cfg.Interface, cfg.Address, cfg.ListenPort)
 	fmt.Printf("public_key=%s\n", cfg.PublicKey)
@@ -209,22 +213,30 @@ func runGateway(path string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
 	fmt.Println("status=awg-gw running; UAPI socket ready")
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("awg-gw shutting down")
-			return nil
-		case err := <-errs:
-			return err
-		case <-dev.Wait():
-			return nil
-		case now := <-ticker.C:
-			fmt.Printf("awg-gw alive ts=%s\n", now.UTC().Format(time.RFC3339))
-		}
+	select {
+	case <-ctx.Done():
+		fmt.Println("awg-gw shutting down")
+		return nil
+	case err := <-errs:
+		return err
+	case <-dev.Wait():
+		return nil
+	}
+}
+
+// awgLogLevel defaults to errors only: verbose logging prints every handshake
+// and keepalive of every peer, which is heavy on busy gateways.
+func awgLogLevel(value string) (int, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "error":
+		return device.LogLevelError, nil
+	case "verbose", "debug":
+		return device.LogLevelVerbose, nil
+	case "silent":
+		return device.LogLevelSilent, nil
+	default:
+		return 0, fmt.Errorf("AWG_LOG_LEVEL must be verbose, error or silent, got %q", value)
 	}
 }
 

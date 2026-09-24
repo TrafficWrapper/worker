@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TrafficWrapper/worker/core/awg/device"
 	"github.com/TrafficWrapper/worker/core/awg/dialect"
 )
 
@@ -224,5 +225,18 @@ func TestLoadActivePeersSkipsMalformedEntries(t *testing.T) {
 	}
 	if len(peers) != 1 || peers[0].AllowedIP != "10.13.13.11/32" {
 		t.Fatalf("malformed entries must be skipped, valid kept: %+v", peers)
+	}
+}
+
+func TestAWGLogLevelDefaultsToErrors(t *testing.T) {
+	cases := map[string]int{"": device.LogLevelError, "verbose": device.LogLevelVerbose, "SILENT": device.LogLevelSilent}
+	for value, want := range cases {
+		got, err := awgLogLevel(value)
+		if err != nil || got != want {
+			t.Fatalf("awgLogLevel(%q)=%d,%v want %d", value, got, err, want)
+		}
+	}
+	if _, err := awgLogLevel("loud"); err == nil {
+		t.Fatal("unknown level accepted")
 	}
 }

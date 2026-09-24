@@ -1,5 +1,19 @@
+x-base: &base
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  security_opt:
+    - no-new-privileges:true
+
+x-defaults: &defaults
+  <<: *base
+  restart: unless-stopped
+
 services:
   agent:
+    <<: *defaults
     build:
       context: .
       dockerfile: agent/Dockerfile
@@ -17,14 +31,24 @@ services:
       - "127.0.0.1:${AGENT_PORT:-9090}:9090/tcp"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    mem_limit: 256m
+    pids_limit: 256
     healthcheck:
       test: ["CMD", "/usr/local/bin/worker-agent", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 12
+      start_period: 30s
 
   awg-gw:
+    <<: *defaults
     build:
       context: .
       dockerfile: awg-gw/Dockerfile
@@ -32,6 +56,8 @@ services:
       agent:
         condition: service_healthy
     command: ["run", "--config", "/worker-state/awg/awg-gw.json"]
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -45,22 +71,45 @@ services:
       - awg-run:/var/run/wireguard
     ports:
       - "${AWG_PORT:-51888}:51821/udp"
-    restart: unless-stopped
+    mem_limit: 512m
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/awg-gw", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   distributor:
+    <<: *defaults
     build:
       context: distributor
     depends_on:
-      - awg-gw
+      awg-gw:
+        condition: service_healthy
     network_mode: "service:awg-gw"
     env_file: .env
     environment:
       AWG_GATEWAY: ${AWG_GATEWAY:-10.13.13.1}
     volumes:
       - ./worker-state/distributor:/worker-state/distributor:ro
-    restart: unless-stopped
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    mem_limit: 128m
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
 
   xray:
+    <<: *defaults
     container_name: ${XRAY_CONTAINER_NAME:-worker-xray-1}
     build:
       context: xray
@@ -68,14 +117,27 @@ services:
       agent:
         condition: service_healthy
       distributor:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./worker-state:/worker-state:ro
     ports:
       - "${XRAY_PORT:-2053}:8443/tcp"
-    restart: unless-stopped
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    mem_limit: 512m
+    pids_limit: 512
+    healthcheck:
+      test: ["CMD-SHELL", "grep -qsE ':20FB [0-9A-F]+:0000 0A' /proc/net/tcp /proc/net/tcp6"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   awg-smoke:
+    <<: *base
     profiles: ["smoke"]
     build:
       context: .

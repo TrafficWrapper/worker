@@ -63,36 +63,68 @@ print(next(net.hosts()))
 PY
 }
 
-write_env() {
-  [ -f .env ] && cp .env ".env.bak.$(date -u +%Y%m%dT%H%M%SZ)"
-  cp .env.example .env
-  xr=${XRAY_PORT:-$(pick_tcp_port)}
-  awg=${AWG_PORT:-$(pick_udp_port)}
-  subnet=${AWG_SUBNET:-10.13.13.0/24}
-  gateway=${AWG_GATEWAY:-$(first_host "$subnet")}
-  egress=$(detect_ip)
-  camouflage=${CAMOUFLAGE_DOMAIN:-}
-  python3 - "$xr" "$awg" "$subnet" "$gateway" "$egress" "$camouflage" <<'PY'
-import sys
-path=".env"
-xr, awg, subnet, gateway, egress, camouflage = sys.argv[1:]
-repl={
- "XRAY_PORT": xr,
- "AWG_PORT": awg,
- "AWG_SUBNET": subnet,
- "AWG_GATEWAY": gateway,
- "EGRESS_IP": egress,
- "CAMOUFLAGE_DOMAIN": camouflage,
+env_value() {
+  [ -f "$2" ] || return 0
+  awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/, ""); v=$0} END{print v}' "$2"
 }
-lines=[]
-for line in open(path):
+
+# write_env regenerates .env from .env.example but keeps every value already
+# set in an existing .env (orchestrator settings, ports, domain), so re-running
+# install.sh on an installed worker is safe.
+write_env() {
+  previous=""
+  if [ -f .env ]; then
+    previous=".env.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    cp .env "$previous"
+    chmod 600 "$previous"
+  fi
+  xr=${XRAY_PORT:-$(env_value XRAY_PORT "$previous")}
+  xr=${xr:-$(pick_tcp_port)}
+  awg=${AWG_PORT:-$(env_value AWG_PORT "$previous")}
+  awg=${awg:-$(pick_udp_port)}
+  subnet=${AWG_SUBNET:-$(env_value AWG_SUBNET "$previous")}
+  subnet=${subnet:-10.13.13.0/24}
+  gateway=${AWG_GATEWAY:-$(env_value AWG_GATEWAY "$previous")}
+  gateway=${gateway:-$(first_host "$subnet")}
+  egress=${EGRESS_IP:-$(env_value EGRESS_IP "$previous")}
+  egress=${egress:-$(detect_ip)}
+  camouflage=${CAMOUFLAGE_DOMAIN:-$(env_value CAMOUFLAGE_DOMAIN "$previous")}
+  python3 - "$previous" "$xr" "$awg" "$subnet" "$gateway" "$egress" "$camouflage" <<'PY'
+import sys
+previous, xr, awg, subnet, gateway, egress, camouflage = sys.argv[1:]
+kept = {}
+if previous:
+    for line in open(previous):
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.rstrip("\n").split("=", 1)
+            if v != "":
+                kept[k.strip()] = v
+repl = dict(kept)
+repl.update({
+    "XRAY_PORT": xr,
+    "AWG_PORT": awg,
+    "AWG_SUBNET": subnet,
+    "AWG_GATEWAY": gateway,
+    "EGRESS_IP": egress,
+    "CAMOUFLAGE_DOMAIN": camouflage,
+})
+lines = []
+seen = set()
+for line in open(".env.example"):
     if "=" in line and not line.startswith("#"):
-        k=line.split("=",1)[0]
+        k = line.split("=", 1)[0]
         if k in repl:
-            line=f"{k}={repl[k]}\n"
+            line = f"{k}={repl[k]}\n"
+            seen.add(k)
     lines.append(line)
-open(path,"w").writelines(lines)
+extra = [k for k in kept if k not in seen]
+if extra:
+    lines.append("\n# Kept from the previous .env\n")
+    lines.extend(f"{k}={kept[k]}\n" for k in extra)
+with open(".env", "w") as f:
+    f.writelines(lines)
 PY
+  chmod 600 .env
 }
 
 verify_dest_hint() {
@@ -118,13 +150,21 @@ verify_dest_hint() {
 apply_nft_optional() {
   [ "${APPLY_NFT:-0}" = "1" ] || return 0
   need nft
-  nft list ruleset >"worker-state/nft-backup.$(date -u +%Y%m%dT%H%M%SZ).txt" 2>/dev/null || true
-  nft add table inet trafficwrapper_worker 2>/dev/null || true
-  nft 'add chain inet trafficwrapper_worker input { type filter hook input priority 20; policy accept; }' 2>/dev/null || true
+  nft list ruleset >"worker-state/nft-backup.$(date -u +%Y%m%dT%H%M%SZ).txt"
   xray_port=$(awk -F= '$1=="XRAY_PORT"{print $2}' .env)
   awg_port=$(awk -F= '$1=="AWG_PORT"{print $2}' .env)
-  nft add rule inet trafficwrapper_worker input tcp dport "$xray_port" counter accept 2>/dev/null || true
-  nft add rule inet trafficwrapper_worker input udp dport "$awg_port" counter accept 2>/dev/null || true
+  nft add table inet trafficwrapper_worker
+  nft 'add chain inet trafficwrapper_worker input { type filter hook input priority 20; policy accept; }'
+  nft flush chain inet trafficwrapper_worker input
+  nft add rule inet trafficwrapper_worker input tcp dport "$xray_port" counter accept
+  nft add rule inet trafficwrapper_worker input udp dport "$awg_port" counter accept
+}
+
+need_tun() {
+  [ -c /dev/net/tun ] || {
+    echo "missing /dev/net/tun; load the tun kernel module (modprobe tun) or enable TUN for this VPS" >&2
+    exit 1
+  }
 }
 
 need docker
@@ -132,10 +172,11 @@ need ss
 need curl
 need python3
 need openssl
+need_tun
 
 mkdir -p worker-state
 write_env
 verify_dest_hint
 apply_nft_optional
-$COMPOSE up -d --build
+$COMPOSE up -d --build --wait --wait-timeout "${WAIT_TIMEOUT:-180}"
 $COMPOSE ps

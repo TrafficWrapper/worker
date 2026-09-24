@@ -41,7 +41,12 @@ orchestrator:
 Worker agent отдаёт `/healthz`, `/self-describe` и `/metrics` на локальном agent
 port (`127.0.0.1:9090` через default Compose mapping). Prometheus endpoint
 предназначен для localhost scraping, потому что AWG peer labels содержат public
-keys, allowed IPs и endpoints.
+keys, allowed IPs и endpoints, если не задан `TW_METRICS_SCRUB_PEER_LABELS=1`.
+См. [Monitoring](#monitoring).
+
+У каждого сервиса есть Docker healthcheck, поэтому `docker compose ps`
+показывает, какой из них не готов. Порядок старта: `agent` → `awg-gw` →
+`distributor` → `xray`.
 
 Для optional wire-level AWG stealth checks используйте `tools/dpi_probe.py` под
 root на worker host с установленным `tcpdump`:
@@ -54,6 +59,75 @@ python3 tools/dpi_probe.py --pcap capture.pcap --dialect /worker-state/awg/awg-g
 Probe читает public worker dialect envelope (`listen_port` + `dialect`) и
 показывает, отсутствуют ли WG magic headers, видны ли padded handshakes,
 отсутствуют ли vanilla handshakes и совпадает ли pre-handshake junk с dialect.
+
+## Monitoring
+
+`/metrics` отдаёт agent на `127.0.0.1:${AGENT_PORT:-9090}`:
+
+```sh
+curl -s http://127.0.0.1:9090/metrics | grep '^tw_worker_'
+```
+
+Порт слушает только localhost. Запускайте Prometheus (или `vmagent`/Grafana
+Alloy) на самом worker host с host networking либо пробрасывайте порт через SSH;
+не публикуйте его. Если метрики уходят с хоста, включите
+`TW_METRICS_SCRUB_PEER_LABELS=1`.
+
+Пример scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: trafficwrapper-worker
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+        labels:
+          worker: worker1
+```
+
+Пример правил алертов:
+
+```yaml
+groups:
+  - name: trafficwrapper-worker
+    rules:
+      - alert: TWWorkerAWGInterfaceDown
+        expr: tw_worker_awg_interface_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AWG interface is down on {{ $labels.worker }}"
+      - alert: TWWorkerOrchestratorUnreachable
+        expr: time() - tw_worker_orch_last_success_timestamp_seconds > 600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful orchestrator request for 10m on {{ $labels.worker }}"
+      - alert: TWWorkerXrayRestartLoop
+        expr: increase(tw_worker_xray_apply_total{mode="restart"}[1h]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Xray restarted more than 3 times in 1h on {{ $labels.worker }}"
+      - alert: TWWorkerDistributorCertExpiring
+        expr: tw_worker_distributor_cert_expiry_seconds < 7 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Distributor TLS certificate expires in less than 7 days on {{ $labels.worker }}"
+      - alert: TWWorkerConfigNotApplied
+        expr: tw_worker_orch_desired_seq - tw_worker_orch_applied_seq > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker has not applied the latest orchestrator config for 15m on {{ $labels.worker }}"
+```
+
+Алерты про orchestrator имеют смысл только в platform mode (задан `ORCH_URL`).
 
 ## Что внутри
 
@@ -146,6 +220,7 @@ binaries:
 | `ORCH_STATIC_PUBLIC_KEY` | Pinned Noise static public key orchestrator. | Обяз. для platform mode | empty | Выполните `orchestrator public-key` на orchestrator. |
 | `ENROLL_TOKEN` | Одноразовый worker enrollment token. | Обяз. для первого enroll | empty | Создаётся в admin UI или CLI orchestrator. |
 | `ORCH_INSECURE_TLS` | Разрешает insecure TLS к orchestrator для local dev. Обязательно, если ORCH использует дефолтный self-signed `ORCH_TLS=1`. | Обяз. для self-signed ORCH | `0` | Ставьте `1` только для test/self-signed ORCH; с production TLS оставляйте `0`. |
+| `ORCH_ACK_INTERVAL` | Как часто agent подтверждает orchestrator применённый config. | Опц. | `90s` | Go duration от `10s` до `1h`. |
 | `PUBLIC_ADDRESS` | Public DNS/IP worker, который увидят clients. | Опц. | detected egress IP | `worker1.example.com` или public IPv4. |
 | `EGRESS_IP` | Явный public egress IP, который увидят clients и ORCH ack. Переопределяет сохранённый bootstrap state. | Опц. | public echo-IP probe, затем local route fallback | Задайте, если auto-detect ошибся. |
 | `CAPACITY` | Capacity hint для orchestrator. | Опц. | `32` | Любое положительное число; невалидное значение останавливает agent. |
@@ -160,6 +235,10 @@ binaries:
 | `AWG_SERVER_KEEPALIVE` | Политика server-side persistent keepalive для всех AWG peer. | Опц. | `0` | Runtime-откат: вернуть прежнее значение и перезапустить `agent` вместе с `awg-gw`. |
 | `XRAY_CONTAINER_NAME` | Docker container, через который agent обновляет пользователей Xray. Изменения устройств применяются на лету через Xray API; прочие изменения конфига перезапускают контейнер. Fallback-поиск ограничен compose-проектом агента. | Опц. | `worker-xray-1` | Compose задаёт стабильный `container_name` с этим значением; меняйте только вместе с именем xray service container. |
 | `DOCKER_SOCKET` | Docker socket path для agent. | Опц. | `/var/run/docker.sock` | Compose монтирует host Docker socket. |
+| `LOG_LEVEL` | Уровень логов agent. | Опц. | `info` | `debug`, `info`, `warn` или `error`. |
+| `AWG_LOG_LEVEL` | Уровень логов `awg-gw` (AmneziaWG device). | Опц. | `error` | `verbose`, `error` или `silent`. |
+| `TW_METRICS_SCRUB_PEER_LABELS` | Заменяет public keys AWG peers в labels `/metrics` на salted hashes и убирает labels `allowed_ip`/`endpoint`. | Опц. | `0` | Ставьте `1`, если метрики уходят с хоста (удалённый Prometheus, общие дашборды). |
+| `TW_METRICS_SCRUB_SALT` | Salt для scrubbed peer labels. | Опц. | генерируется один раз в `worker-state/metrics_salt` | Одинаковое значение на нескольких воркерах позволяет сопоставлять peers между ними. |
 | `DISTRIBUTOR_URL` | Internal URL `/tw/` distributor. | Опц. | `http://awg-gw:8080/tw` | Оставьте default для Compose. |
 | `WORKER_AGENT_URL` | Public/internal URL override для agent self-reference. | Опц. | empty | Только для custom deployments. |
 | `CAMOUFLAGE_DOMAIN` | REALITY serverName/camouflage SNI и fallback identity. | Обяз. для REALITY | empty, отказ до настройки | Используйте реальный TLS 1.3 домен, подходящий вашему deployment; `example.com` и `example.org` отклоняются. |
@@ -177,6 +256,7 @@ binaries:
 | `COMPOSE` | Compose command для `install.sh`/`uninstall.sh`. | Опц. | `docker compose` | `docker-compose` на старых hosts. |
 | `REALITY_PORT_POOL` | TCP port pool для auto-selection в `install.sh`. | Опц. | `8444 2053 2083` | Quoted space-separated list. |
 | `AWG_PORT_POOL` | UDP port pool для auto-selection в `install.sh`. | Опц. | `51888 51889 51890 51891` | Quoted space-separated list. |
+| `WAIT_TIMEOUT` | Сколько секунд `install.sh` ждёт, пока все сервисы станут healthy. | Опц. | `180` | Увеличьте на медленных хостах, где первая сборка дольше. |
 | `SERVICE_NAME` | `awg-gw` stub/debug service name. | Опц. | `awg-gw` | Только для stub/manual runs. |
 | `AWG_LISTEN_UDP` | `awg-gw` stub/debug UDP listen value. | Опц. | `51821` | Только для stub/manual runs. |
 | `AWG_ENDPOINT` | Endpoint для профиля `awg-smoke`. | Опц. | `host.docker.internal:51888` | Задайте worker public endpoint для remote smoke tests. |
@@ -191,6 +271,59 @@ binaries:
 Отключение server keepalive само по себе не доказывает достижимость idle-клиента
 за carrier NAT: для этого нужны отдельная device-проба и подтверждение оператора
 из плана выкладки.
+
+## Backup / upgrade / rollback
+
+Вся идентичность воркера и сгенерированный материал лежат в `./worker-state`
+(владелец root, секреты с mode `0600`):
+
+| Путь | Содержимое |
+| --- | --- |
+| `bootstrap.json` | REALITY key pair, AWG server key, dialect, Noise static key (идентичность воркера для orchestrator). |
+| `awg/` | `awg-gw.json` (интерфейс + dialect) и `peers.json` (материализованные AWG peers). |
+| `xray/` | Сгенерированный Xray REALITY `config.json`. |
+| `distributor/certs/` | TLS-сертификат и ключ distributor; в `distributor/tw/` лежат опубликованные файлы для клиентов. |
+| `orch/` | `state.json` (enrollment/sequence state), последний подписанный `worker-config.json` + `.minisig`. |
+| `metrics_salt` | Salt для scrubbed metrics labels (создаётся при `TW_METRICS_SCRUB_PEER_LABELS=1`, если salt не задан). |
+
+Потеря `bootstrap.json` означает новые ключи REALITY/AWG/Noise: всех клиентов
+придётся перевыпустить, а воркер заново enroll-ить. Бэкапьте `worker-state/` и
+`.env` вместе и храните архив так же строго, как сами ключи:
+
+```sh
+sudo tar -czf worker-backup-$(date -u +%Y%m%dT%H%M%SZ).tgz worker-state .env
+```
+
+`./uninstall.sh` пишет такой же архив (`worker-state-backup-<UTC>.tgz`) перед
+удалением state. Флаги: `--yes` (без вопроса; обязателен без TTY),
+`--keep-state`, `--purge-images` (дополнительно удаляет локально собранные
+образы и volume `awg-run`).
+
+Перенос воркера на другой хост: остановите его (`docker compose down`),
+скопируйте архив, склонируйте тот же релиз на новом хосте, распакуйте архив в
+checkout, при смене адреса обновите `PUBLIC_ADDRESS`/`EGRESS_IP`, затем
+`docker compose up -d --build --wait`. Никогда не запускайте два воркера с
+одним и тем же `worker-state` одновременно.
+
+Обновление:
+
+```sh
+git pull
+docker compose up -d --build --wait
+```
+
+`git pull && ./install.sh` тоже работает, но `install.sh` заново генерирует
+`.env` из `.env.example` (старый файл сохраняется как `.env.bak.<UTC>`) и переносит только порты, подсеть,
+egress IP и `CAMOUFLAGE_DOMAIN`; `ORCH_*` и остальные настройки перенесите из
+бэкапа и снова выполните `docker compose up -d`.
+
+Откат на предыдущий релиз (сначала сделайте бэкап; state, записанный новой
+версией, не обязательно читается старой):
+
+```sh
+git checkout <tag>
+docker compose up -d --build
+```
 
 ## Локальная проверка сборки
 

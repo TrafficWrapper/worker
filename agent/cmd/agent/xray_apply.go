@@ -37,6 +37,7 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 		return nil
 	}
 	if cfg.XrayContainer == "" {
+		recordXrayApply("failed")
 		return errors.New("xray config changed but XRAY_CONTAINER_NAME is not configured")
 	}
 	if xrayChanged {
@@ -53,6 +54,7 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 			if err := clearXrayRestartPending(cfg); err != nil {
 				return fmt.Errorf("clear xray restart pending: %w", err)
 			}
+			recordXrayApply("live")
 			log.Printf("xray materialized approved_devices=%d without restart", approvedDeviceCount)
 			return nil
 		}
@@ -62,8 +64,10 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 	}
 	log.Printf("xray config changed; restarting container %s via %s", cfg.XrayContainer, cfg.DockerSocket)
 	if err := restartDockerContainer(cfg.DockerSocket, cfg.XrayContainer); err != nil {
+		recordXrayApply("failed")
 		return fmt.Errorf("restart xray container %s: %w", cfg.XrayContainer, err)
 	}
+	recordXrayApply("restart")
 	if err := clearXrayRestartPending(cfg); err != nil {
 		return fmt.Errorf("clear xray restart pending: %w", err)
 	}

@@ -71,6 +71,7 @@ type awgDesiredPeer struct {
 
 type awgPeerConfig struct {
 	PublicKeyHex        string
+	PresharedKeyHex     string `json:"-"`
 	AllowedIPs          []string
 	Endpoint            string
 	PersistentKeepalive int64
@@ -285,7 +286,7 @@ func filterUnexpiredApprovedDevices(devices []approvedDevice, now time.Time) []a
 	out := make([]approvedDevice, 0, len(devices))
 	for _, device := range devices {
 		if expiresAt, ok := approvedDeviceExpiry(device); ok && !now.Before(expiresAt) {
-			log.Printf("approved device %s expired at %s; skipping materialization", device.DeviceID, expiresAt.Format(time.RFC3339))
+			logDebugf("approved device %s expired at %s; skipping materialization", device.DeviceID, expiresAt.Format(time.RFC3339))
 			continue
 		}
 		out = append(out, device)
@@ -349,7 +350,7 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 		deviceExpires := expires
 		if parsed, ok := approvedDeviceExpiry(device); ok {
 			if !now.Before(parsed) {
-				log.Printf("approved device %s expired at %s; skipping AWG peer", device.DeviceID, parsed.Format(time.RFC3339))
+				logDebugf("approved device %s expired at %s; skipping AWG peer", device.DeviceID, parsed.Format(time.RFC3339))
 				continue
 			}
 			deviceExpires = parsed
@@ -408,13 +409,22 @@ func approvedDeviceExpiry(device approvedDevice) (time.Time, bool) {
 	return parsed.UTC(), true
 }
 
+// syncAWGUAPI converges the device to the desired peers. Only the difference
+// against the live peer list is sent, as a single UAPI set operation; if that
+// batch fails, peers are retried one by one so a single bad peer is isolated.
 func syncAWGUAPI(socketPath string, desired []awgDesiredPeer, keepaliveSec int) error {
 	current, err := listAWGPeerConfigs(socketPath)
 	if err != nil {
+		uapiErrorsTotal.Add(1)
 		return err
+	}
+	currentByHex := make(map[string]awgPeerConfig, len(current))
+	for _, peer := range current {
+		currentByHex[peer.PublicKeyHex] = peer
 	}
 	desiredHex := make(map[string]struct{}, len(desired))
 	var desiredErr error
+	var changed []awgDesiredPeer
 	for _, peer := range desired {
 		hexKey, err := base64KeyToHex(peer.PublicKey)
 		if err != nil {
@@ -424,27 +434,85 @@ func syncAWGUAPI(socketPath string, desired []awgDesiredPeer, keepaliveSec int) 
 			continue
 		}
 		desiredHex[hexKey] = struct{}{}
-	}
-	if desiredErr == nil {
-		for _, peer := range current {
-			if _, ok := desiredHex[peer.PublicKeyHex]; ok {
-				continue
-			}
-			if err := removeAWGPeerHex(socketPath, peer.PublicKeyHex); err != nil {
-				return err
-			}
-		}
-	}
-	var addErrs []error
-	for _, peer := range desired {
-		if _, err := base64KeyToHex(peer.PublicKey); err != nil {
+		if live, ok := currentByHex[hexKey]; ok && awgPeerMatches(live, peer, keepaliveSec) {
 			continue
 		}
-		if err := addAWGPeer(socketPath, peer, keepaliveSec); err != nil {
-			addErrs = append(addErrs, err)
+		changed = append(changed, peer)
+	}
+	var stale []string
+	// An incomplete desired set must never remove live peers.
+	if desiredErr == nil {
+		for _, peer := range current {
+			if _, ok := desiredHex[peer.PublicKeyHex]; !ok {
+				stale = append(stale, peer.PublicKeyHex)
+			}
 		}
 	}
-	return errors.Join(append([]error{desiredErr}, addErrs...)...)
+	if len(changed) == 0 && len(stale) == 0 {
+		return desiredErr
+	}
+	lines, buildErr := awgBatchLines(changed, stale, keepaliveSec)
+	if buildErr == nil {
+		if err := writeUAPI(socketPath, lines); err == nil {
+			return desiredErr
+		}
+		uapiErrorsTotal.Add(1)
+	}
+	var errs []error
+	for _, pubHex := range stale {
+		if err := removeAWGPeerHex(socketPath, pubHex); err != nil {
+			uapiErrorsTotal.Add(1)
+			errs = append(errs, err)
+		}
+	}
+	for _, peer := range changed {
+		if err := addAWGPeer(socketPath, peer, keepaliveSec); err != nil {
+			uapiErrorsTotal.Add(1)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(append([]error{desiredErr}, errs...)...)
+}
+
+func awgBatchLines(changed []awgDesiredPeer, stale []string, keepaliveSec int) ([]string, error) {
+	lines := []string{"set=1"}
+	for _, pubHex := range stale {
+		normalized, err := normalizeHexKey(pubHex)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, "public_key="+normalized, "remove=true")
+	}
+	for _, peer := range changed {
+		pubHex, err := base64KeyToHex(peer.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("wg public key: %w", err)
+		}
+		pskHex, err := base64KeyToHex(peer.PSK2)
+		if err != nil {
+			return nil, fmt.Errorf("psk2: %w", err)
+		}
+		lines = append(lines, serverpeer.PeerUAPILines(pubHex, pskHex, peer.AllowedIP, keepaliveSec)...)
+	}
+	return append(lines, "", ""), nil
+}
+
+// awgPeerMatches reports whether a live peer already has the desired policy.
+// The preshared key is compared only when the device reports it.
+func awgPeerMatches(live awgPeerConfig, want awgDesiredPeer, keepaliveSec int) bool {
+	if live.PersistentKeepalive != int64(keepaliveSec) {
+		return false
+	}
+	if len(live.AllowedIPs) != 1 || strings.TrimSpace(live.AllowedIPs[0]) != strings.TrimSpace(want.AllowedIP) {
+		return false
+	}
+	if live.PresharedKeyHex != "" {
+		pskHex, err := base64KeyToHex(want.PSK2)
+		if err != nil || pskHex != live.PresharedKeyHex {
+			return false
+		}
+	}
+	return true
 }
 
 func reconcileAWGPeers(cfg envConfig, st stateFile) error {
@@ -546,8 +614,8 @@ func awgPeersNeedSync(current []awgPeerConfig, desired []awgDesiredPeer, keepali
 		if peer.PersistentKeepalive != int64(keepaliveSec) {
 			return true, "persistent keepalive differs", nil
 		}
-		if len(peer.AllowedIPs) != 1 || strings.TrimSpace(peer.AllowedIPs[0]) != strings.TrimSpace(wanted.AllowedIP) {
-			return true, "allowed IP differs", nil
+		if !awgPeerMatches(peer, wanted, keepaliveSec) {
+			return true, "allowed IP or preshared key differs", nil
 		}
 	}
 	return false, "", nil
@@ -619,6 +687,10 @@ func listAWGPeerConfigs(socketPath string) ([]awgPeerConfig, error) {
 			}
 			peers = append(peers, awgPeerConfig{PublicKeyHex: normalized, PersistentKeepalive: -1})
 			current = len(peers) - 1
+		case "preshared_key":
+			if current >= 0 {
+				peers[current].PresharedKeyHex = strings.ToLower(value)
+			}
 		case "persistent_keepalive_interval":
 			if current >= 0 {
 				parsed, err := strconv.ParseInt(value, 10, 64)

@@ -38,3 +38,6 @@ build/update-release/
 
 # Local go build output
 /agent/cmd/agent/agent
+
+# Uninstall backups (contain worker keys)
+worker-state-backup-*.tgz

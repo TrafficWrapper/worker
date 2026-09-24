@@ -168,3 +168,44 @@ func TestUAPILinesNeverContainNewlines(t *testing.T) {
 		t.Fatalf("expected canonical h1=%s, got %v", h1, got)
 	}
 }
+
+func TestGenerateWideStaysValidAndVaries(t *testing.T) {
+	seen := map[int]struct{}{}
+	for i := 0; i < 50; i++ {
+		d, err := GenerateWide()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Jmin < minJmin || d.Jmin > maxJmin || d.Jmax <= d.Jmin || d.Jc < minJc || d.Jc > maxJc {
+			t.Fatalf("out of range: %+v", d)
+		}
+		seen[d.Jmin] = struct{}{}
+	}
+	if len(seen) < 5 {
+		t.Fatalf("jmin barely varies: %v", seen)
+	}
+}
+
+func TestValidateAcceptsLegacyAndRejectsOutOfRangeJunk(t *testing.T) {
+	legacy, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Jmin != 8 || legacy.Jc < 4 || legacy.Jc > 12 || legacy.Jmax < 40 || legacy.Jmax > 80 {
+		t.Fatalf("legacy generator left its compatible ranges: %+v", legacy)
+	}
+	for _, mutate := range []func(*Dialect){
+		func(d *Dialect) { d.Jc = 2 },
+		func(d *Dialect) { d.Jc = 17 },
+		func(d *Dialect) { d.Jmin = 7 },
+		func(d *Dialect) { d.Jmin = 65 },
+		func(d *Dialect) { d.Jmax = d.Jmin },
+		func(d *Dialect) { d.Jmax = 265 },
+	} {
+		d := legacy
+		mutate(&d)
+		if err := ValidateProduction(d, DefaultMTU); err == nil {
+			t.Fatalf("accepted %+v", d)
+		}
+	}
+}

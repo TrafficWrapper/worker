@@ -235,6 +235,7 @@ binaries:
 | `EGRESS_IP` | Явный public egress IP, который увидят clients и ORCH ack. Переопределяет сохранённый bootstrap state. | Опц. | public echo-IP probe, затем local route fallback | Задайте, если auto-detect ошибся. |
 | `CAPACITY` | Capacity hint для orchestrator. | Опц. | `32` | Любое положительное число; невалидное значение останавливает agent. |
 | `REALITY_INBOUNDS` | Дополнительные REALITY-inbound'ы в JSON (`name`, `network` tcp/xhttp, `listen_port`, `public_port`, `xhttp_path`, `xhttp_mode`, `xhttp_host`). Клиенты получают их как `reality_profiles` в self-describe для fallback. | Опц. | пусто | Опубликуйте каждый `listen_port` через `docker-compose.override.yml` с `ports: ["<public_port>:<listen_port>/tcp"]` у `xray`. |
+| `WORKER_DIALECT_WIDE` | Генерировать новые диалекты AWG с широкими диапазонами junk-пакетов вместо общего отпечатка Jmin=8. | Опц. | `0` | Ставьте `1`, только когда все клиенты принимают Jc 3..16, Jmin 8..64. Ротация диалекта — в ARCHITECTURE. |
 | `WORKER_BLOCK_SMTP` | Блокирует клиентам исходящую почту на порты 25/465/587 (Xray и AWG). | Опц. | `1` | Оставьте `1`: спам с IP воркера приводит к блокировке хоста. |
 | `WORKER_BLOCK_BITTORRENT` | Блокирует BitTorrent для REALITY-клиентов (включает sniffing Xray с `routeOnly`). | Опц. | `1` | Оставьте `1`, чтобы хостер не получал DMCA-жалобы. |
 | `REALITY_PROBE_ADDR` | Адрес, по которому агент проверяет свой REALITY-листенер как цензор без ключа клиента. | Опц. | `xray:8443` | Оставьте default Compose. |

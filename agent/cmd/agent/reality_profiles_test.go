@@ -93,3 +93,29 @@ func TestDiffXrayUsersCoversEveryRealityInbound(t *testing.T) {
 		t.Fatalf("diffs=%+v", diffs)
 	}
 }
+
+func TestAWGProfileOwnDialectIsGeneratedOnceAndAdvertised(t *testing.T) {
+	cfg := envConfig{AWGProfiles: []awgInboundProfile{
+		{Name: "awg", Interface: "awg1", ListenPort: 51821, Subnet: "10.13.13.0/24"},
+		{Name: "next", Interface: "awg2", ListenPort: 51822, Subnet: "10.44.0.0/24", OwnDialect: true},
+	}}
+	base, err := generateDialect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := stateFile{Dialect: base}
+	changed, err := ensureProfileDialects(cfg, &st)
+	if err != nil || !changed {
+		t.Fatalf("changed=%t err=%v", changed, err)
+	}
+	next := st.ProfileDialects["next"]
+	if next == base || profileDialect(st, cfg.AWGProfiles[1]) != next || profileDialect(st, cfg.AWGProfiles[0]) != base {
+		t.Fatal("profile dialect not isolated from the worker dialect")
+	}
+	if changed, _ := ensureProfileDialects(cfg, &st); changed {
+		t.Fatal("existing profile dialect regenerated")
+	}
+	if profileDialectID(st, cfg.AWGProfiles[1]) == profileDialectID(st, cfg.AWGProfiles[0]) {
+		t.Fatal("profile dialect id not distinct")
+	}
+}

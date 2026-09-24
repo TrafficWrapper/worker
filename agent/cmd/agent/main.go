@@ -46,16 +46,19 @@ const (
 )
 
 type stateFile struct {
-	CreatedAt        time.Time            `json:"created_at"`
-	Hostname         string               `json:"hostname"`
-	EgressIP         string               `json:"egress_ip"`
-	Reality          realityState         `json:"reality"`
-	AWG              awgState             `json:"awg"`
-	Dialect          dialect.Dialect      `json:"dialect"`
-	DialectID        string               `json:"dialect_id"`
-	NoiseStatic      protocol.KeyPairFile `json:"noise_static"`
-	EnrollTokenHash  string               `json:"enroll_token_hash,omitempty"`
-	SmokeRealityUUID string               `json:"smoke_reality_uuid"`
+	CreatedAt       time.Time            `json:"created_at"`
+	Hostname        string               `json:"hostname"`
+	EgressIP        string               `json:"egress_ip"`
+	Reality         realityState         `json:"reality"`
+	AWG             awgState             `json:"awg"`
+	Dialect         dialect.Dialect      `json:"dialect"`
+	DialectID       string               `json:"dialect_id"`
+	NoiseStatic     protocol.KeyPairFile `json:"noise_static"`
+	EnrollTokenHash string               `json:"enroll_token_hash,omitempty"`
+	// ProfileDialects holds dialects of AWG profiles with own_dialect, keyed
+	// by profile name.
+	ProfileDialects  map[string]dialect.Dialect `json:"profile_dialects,omitempty"`
+	SmokeRealityUUID string                     `json:"smoke_reality_uuid"`
 }
 
 type realityState struct {
@@ -122,6 +125,9 @@ type awgInboundProfile struct {
 	Gateway        string `json:"gateway,omitempty"`
 	UAPISocket     string `json:"uapi_socket,omitempty"`
 	MinVersionCode int    `json:"min_version_code,omitempty"`
+	// OwnDialect gives the profile its own generated dialect instead of the
+	// worker's, so a dialect can be rotated by moving clients to a new profile.
+	OwnDialect bool `json:"own_dialect,omitempty"`
 }
 
 func main() {
@@ -684,7 +690,11 @@ func bootstrap(cfg envConfig) (stateFile, error) {
 		if err != nil {
 			return stateFile{}, err
 		}
-		if ensureRealityCohorts(&st) {
+		changed, err := ensureProfileDialects(cfg, &st)
+		if err != nil {
+			return stateFile{}, err
+		}
+		if ensureRealityCohorts(&st) || changed {
 			if err := writeJSONFile(path, st, 0o600); err != nil {
 				return stateFile{}, err
 			}
@@ -759,6 +769,9 @@ func bootstrap(cfg envConfig) (stateFile, error) {
 		SmokeRealityUUID: uuidV4(),
 	}
 	ensureRealityCohorts(&st)
+	if _, err := ensureProfileDialects(cfg, &st); err != nil {
+		return stateFile{}, err
+	}
 	raw, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return stateFile{}, err
@@ -812,7 +825,7 @@ func workerDialect() (dialect.Dialect, error) {
 		}
 		return d, nil
 	}
-	d, err := dialect.Generate()
+	d, err := generateDialect()
 	if err != nil {
 		return dialect.Dialect{}, err
 	}
@@ -1119,7 +1132,7 @@ func renderAWG(cfg envConfig, st stateFile) error {
 			"listen_port":      profile.ListenPort,
 			"private_key_hex":  st.AWG.PrivateKeyHex,
 			"public_key":       st.AWG.PublicKey,
-			"dialect":          st.Dialect,
+			"dialect":          profileDialect(st, profile),
 			"peer_registry":    profile.registryPath(cfg.StateDir),
 			"server_keepalive": cfg.AWGServerKeepalive,
 		}
@@ -1322,8 +1335,8 @@ func awgSelfDescribe(cfg envConfig, st stateFile, profile awgInboundProfile) map
 		"subnet":            profile.Subnet,
 		"gateway":           profile.Gateway,
 		"min_version_code":  profile.MinVersionCode,
-		"dialect":           st.Dialect,
-		"dialect_id":        st.DialectID,
+		"dialect":           profileDialect(st, profile),
+		"dialect_id":        profileDialectID(st, profile),
 		"smoke_peer_config": "/worker-state/smoke/awg-peer.conf",
 	}
 }
@@ -1768,4 +1781,51 @@ func fileExists(path string) bool {
 func fatal(err error) {
 	log.Printf("worker-agent: %v", err)
 	os.Exit(1)
+}
+
+// generateDialect uses the wide junk-packet ranges only when the operator
+// confirms every client accepts them (WORKER_DIALECT_WIDE=1).
+func generateDialect() (dialect.Dialect, error) {
+	if getenv("WORKER_DIALECT_WIDE", "0") == "1" {
+		return dialect.GenerateWide()
+	}
+	return dialect.Generate()
+}
+
+func ensureProfileDialects(cfg envConfig, st *stateFile) (bool, error) {
+	changed := false
+	for _, profile := range awgProfiles(cfg) {
+		if !profile.OwnDialect || profile.isBase() {
+			continue
+		}
+		if _, ok := st.ProfileDialects[profile.Name]; ok {
+			continue
+		}
+		d, err := generateDialect()
+		if err != nil {
+			return false, err
+		}
+		if st.ProfileDialects == nil {
+			st.ProfileDialects = map[string]dialect.Dialect{}
+		}
+		st.ProfileDialects[profile.Name] = d
+		changed = true
+	}
+	return changed, nil
+}
+
+func profileDialect(st stateFile, profile awgInboundProfile) dialect.Dialect {
+	if d, ok := st.ProfileDialects[profile.Name]; ok && profile.OwnDialect {
+		return d
+	}
+	return st.Dialect
+}
+
+func profileDialectID(st stateFile, profile awgInboundProfile) string {
+	if d, ok := st.ProfileDialects[profile.Name]; ok && profile.OwnDialect {
+		if id, err := dialectHash(d); err == nil {
+			return id
+		}
+	}
+	return st.DialectID
 }

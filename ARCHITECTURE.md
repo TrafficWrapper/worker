@@ -36,3 +36,13 @@ owner trusts operationally.
   orchestrator assigns a device to a cohort; listing a short ID in
   `desired_state.revoked_short_ids` stops accepting it, so a leaked cohort
   can be cut off without rotating the worker key.
+
+## Rotating the AWG dialect
+
+The dialect cannot change in place on a port without breaking every client, so
+it is rotated through profiles: add an `AWG_INBOUNDS` profile with
+`"own_dialect": true` on a new port and subnet (and its own `awg-gw` service),
+let the orchestrator move clients to it using `awg_profiles` in self-describe,
+then remove the old profile. `WORKER_DIALECT_WIDE=1` draws junk-packet
+parameters (Jc, Jmin, Jmax) from the wider ranges; enable it only after every
+client accepts them.

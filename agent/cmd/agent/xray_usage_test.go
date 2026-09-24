@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestBuildRealityUsageReportsMapsPerUserStats(t *testing.T) {
@@ -40,6 +41,24 @@ func TestBuildRealityUsageReportsMapsPerUserStats(t *testing.T) {
 	}
 	if reports[1].DeviceID != "device-b" || reports[1].RxBytes != 0 || reports[1].TxBytes != 0 {
 		t.Fatalf("zero baseline missing for device-b: %+v", reports[1])
+	}
+}
+
+func TestAccumulateRealityUsageSurvivesCounterResets(t *testing.T) {
+	state := usageState{}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	accumulateRealityUsage([]orchUsageReport{{DeviceID: "a", Source: realityUsageSource, RxBytes: 100, TxBytes: 10}}, state, now)
+	reports := accumulateRealityUsage([]orchUsageReport{{DeviceID: "a", Source: realityUsageSource, RxBytes: 5, TxBytes: 1}}, state, now.Add(time.Minute))
+	if len(reports) != 1 || reports[0].RxBytes != 105 || reports[0].TxBytes != 11 {
+		t.Fatalf("totals must keep growing across reset queries: %+v", reports)
+	}
+	state["reality:stale"] = usageSnapshot{RxBytes: 1, UpdatedAt: now.Add(-usageStateRetention - time.Hour)}
+	accumulateRealityUsage(nil, state, now.Add(2*time.Minute))
+	if _, ok := state["reality:stale"]; ok {
+		t.Fatal("stale usage entry was not pruned")
+	}
+	if _, ok := state["reality:a"]; !ok {
+		t.Fatal("fresh usage entry was pruned")
 	}
 }
 
@@ -125,7 +144,7 @@ func TestQueryXrayStatsViaDockerExec(t *testing.T) {
 	mu.Lock()
 	joined := strings.Join(command, " ")
 	mu.Unlock()
-	if !strings.Contains(joined, "statsquery") || !strings.Contains(joined, "127.0.0.1:10085") || !strings.Contains(joined, "-reset=false") {
+	if !strings.Contains(joined, "statsquery") || !strings.Contains(joined, "127.0.0.1:10085") || !strings.Contains(joined, "-reset=true") {
 		t.Fatalf("unexpected xray command: %q", joined)
 	}
 }

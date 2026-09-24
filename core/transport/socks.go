@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,8 +23,13 @@ import (
 const (
 	socksVersion5               = 0x05
 	socksNoAuth                 = 0x00
+	socksUserPassAuth           = 0x02
+	socksNoAcceptableAuth       = 0xff
+	socksUserPassVersion        = 0x01
 	socksConnect                = 0x01
-	socksProxyBufferLen         = 256 * 1024
+	socksProxyBufferLen         = 32 * 1024
+	socksSocketBufferLen        = 256 * 1024
+	defaultSOCKSMaxConns        = 1024
 	socksShutdownGrace          = 2 * time.Second
 	socksClientHandshakeTimeout = 45 * time.Second
 	socksUpstreamDialTimeout    = 30 * time.Second
@@ -32,6 +39,7 @@ var (
 	socksAcceptBackoffMin = 50 * time.Millisecond
 	socksAcceptBackoffMax = 200 * time.Millisecond
 	socksProxyIdleTimeout = 3 * time.Minute
+	socksDeadlineRefresh  = time.Second
 )
 
 var socksProxyBuffers = sync.Pool{
@@ -47,15 +55,37 @@ type socksServer struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
+	username string
+	password string
+	sem      chan struct{}
 }
 
-func startSOCKSServer(listen string, tnet *netstacktun.Net) (*socksServer, error) {
-	ln, err := net.Listen("tcp", listen)
+type socksOptions struct {
+	listen   string
+	username string
+	password string
+	maxConns int
+}
+
+func startSOCKSServer(opts socksOptions, tnet *netstacktun.Net) (*socksServer, error) {
+	ln, err := net.Listen("tcp", opts.listen)
 	if err != nil {
-		return nil, fmt.Errorf("listen socks %s: %w", listen, err)
+		return nil, fmt.Errorf("listen socks %s: %w", opts.listen, err)
+	}
+	maxConns := opts.maxConns
+	if maxConns <= 0 {
+		maxConns = defaultSOCKSMaxConns
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	server := &socksServer{listener: ln, tnet: tnet, ctx: ctx, cancel: cancel}
+	server := &socksServer{
+		listener: ln,
+		tnet:     tnet,
+		ctx:      ctx,
+		cancel:   cancel,
+		username: opts.username,
+		password: opts.password,
+		sem:      make(chan struct{}, maxConns),
+	}
 	server.wg.Add(1)
 	go server.serve(ctx)
 	return server, nil
@@ -109,11 +139,34 @@ func (s *socksServer) serve(ctx context.Context) {
 			return
 		}
 		backoff = socksAcceptBackoffMin
+		if !s.acquire() {
+			_ = client.Close()
+			continue
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer s.release()
 			_ = s.handle(ctx, client)
 		}()
+	}
+}
+
+func (s *socksServer) acquire() bool {
+	if s.sem == nil {
+		return true
+	}
+	select {
+	case s.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *socksServer) release() {
+	if s.sem != nil {
+		<-s.sem
 	}
 }
 
@@ -133,7 +186,7 @@ func (s *socksServer) handle(ctx context.Context, client net.Conn) error {
 	if err := client.SetDeadline(time.Now().Add(socksClientHandshakeTimeout)); err != nil {
 		return err
 	}
-	if err := socksHandshake(client); err != nil {
+	if err := socksHandshake(client, s.username, s.password); err != nil {
 		return err
 	}
 	target, err := readSOCKSConnect(client)
@@ -162,7 +215,7 @@ func (s *socksServer) handle(ctx context.Context, client net.Conn) error {
 	return proxy(ctx, client, upstream)
 }
 
-func socksHandshake(rw io.ReadWriter) error {
+func socksHandshake(rw io.ReadWriter, username, password string) error {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(rw, header); err != nil {
 		return err
@@ -174,14 +227,66 @@ func socksHandshake(rw io.ReadWriter) error {
 	if _, err := io.ReadFull(rw, methods); err != nil {
 		return err
 	}
+	want := byte(socksNoAuth)
+	if username != "" || password != "" {
+		want = socksUserPassAuth
+	}
 	for _, method := range methods {
-		if method == socksNoAuth {
-			_, err := rw.Write([]byte{socksVersion5, socksNoAuth})
+		if method != want {
+			continue
+		}
+		if _, err := rw.Write([]byte{socksVersion5, want}); err != nil {
 			return err
 		}
+		if want == socksUserPassAuth {
+			return socksUserPassNegotiate(rw, username, password)
+		}
+		return nil
 	}
-	_, _ = rw.Write([]byte{socksVersion5, 0xff})
+	_, _ = rw.Write([]byte{socksVersion5, socksNoAcceptableAuth})
+	if want == socksUserPassAuth {
+		return errors.New("socks client offered no username/password method")
+	}
 	return errors.New("socks client offered no no-auth method")
+}
+
+func socksUserPassNegotiate(rw io.ReadWriter, username, password string) error {
+	var version [1]byte
+	if _, err := io.ReadFull(rw, version[:]); err != nil {
+		return err
+	}
+	if version[0] != socksUserPassVersion {
+		_, _ = rw.Write([]byte{socksUserPassVersion, 0x01})
+		return fmt.Errorf("unsupported socks auth version %d", version[0])
+	}
+	gotUser, err := readSOCKSAuthField(rw)
+	if err != nil {
+		return err
+	}
+	gotPass, err := readSOCKSAuthField(rw)
+	if err != nil {
+		return err
+	}
+	userOK := subtle.ConstantTimeCompare(gotUser, []byte(username))
+	passOK := subtle.ConstantTimeCompare(gotPass, []byte(password))
+	if userOK&passOK != 1 {
+		_, _ = rw.Write([]byte{socksUserPassVersion, 0x01})
+		return errors.New("socks authentication failed")
+	}
+	_, err = rw.Write([]byte{socksUserPassVersion, 0x00})
+	return err
+}
+
+func readSOCKSAuthField(r io.Reader) ([]byte, error) {
+	var size [1]byte
+	if _, err := io.ReadFull(r, size[:]); err != nil {
+		return nil, err
+	}
+	raw := make([]byte, int(size[0]))
+	if _, err := io.ReadFull(r, raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 type socksTarget struct {
@@ -328,8 +433,8 @@ func proxy(ctx context.Context, left, right net.Conn) error {
 func tuneConn(conn net.Conn) {
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
-		_ = tcp.SetReadBuffer(socksProxyBufferLen)
-		_ = tcp.SetWriteBuffer(socksProxyBufferLen)
+		_ = tcp.SetReadBuffer(socksSocketBufferLen)
+		_ = tcp.SetWriteBuffer(socksSocketBufferLen)
 		return
 	}
 	type bufferTuner interface {
@@ -337,8 +442,8 @@ func tuneConn(conn net.Conn) {
 		SetWriteBuffer(int) error
 	}
 	if tuned, ok := conn.(bufferTuner); ok {
-		_ = tuned.SetReadBuffer(socksProxyBufferLen)
-		_ = tuned.SetWriteBuffer(socksProxyBufferLen)
+		_ = tuned.SetReadBuffer(socksSocketBufferLen)
+		_ = tuned.SetWriteBuffer(socksSocketBufferLen)
 	}
 }
 
@@ -362,32 +467,59 @@ func isTemporaryAcceptError(err error) bool {
 }
 
 type proxyDeadlines struct {
-	conns []net.Conn
-	idle  time.Duration
+	conns     [2]net.Conn
+	idle      time.Duration
+	refresh   time.Duration
+	lastRead  atomic.Int64
+	lastWrite [2]atomic.Int64
 }
 
-func newProxyDeadlines(left, right net.Conn, idle time.Duration) proxyDeadlines {
-	return proxyDeadlines{conns: []net.Conn{left, right}, idle: idle}
+func newProxyDeadlines(left, right net.Conn, idle time.Duration) *proxyDeadlines {
+	refresh := socksDeadlineRefresh
+	if idle/4 < refresh {
+		refresh = idle / 4
+	}
+	return &proxyDeadlines{conns: [2]net.Conn{left, right}, idle: idle, refresh: refresh}
 }
 
-func (d proxyDeadlines) touchRead() {
+func (d *proxyDeadlines) due(last *atomic.Int64, now time.Time) bool {
+	prev := last.Load()
+	if prev != 0 && now.UnixNano()-prev < int64(d.refresh) {
+		return false
+	}
+	return last.CompareAndSwap(prev, now.UnixNano())
+}
+
+func (d *proxyDeadlines) touchRead() {
 	if d.idle <= 0 {
 		return
 	}
-	deadline := time.Now().Add(d.idle)
+	now := time.Now()
+	if !d.due(&d.lastRead, now) {
+		return
+	}
+	deadline := now.Add(d.idle)
 	for _, conn := range d.conns {
 		_ = conn.SetReadDeadline(deadline)
 	}
 }
 
-func (d proxyDeadlines) touchWrite(conn net.Conn) {
+func (d *proxyDeadlines) touchWrite(conn net.Conn) {
 	if d.idle <= 0 {
 		return
 	}
-	_ = conn.SetWriteDeadline(time.Now().Add(d.idle))
+	i := 0
+	if conn == d.conns[1] {
+		i = 1
+	}
+	now := time.Now()
+	if !d.due(&d.lastWrite[i], now) {
+		return
+	}
+	_ = conn.SetWriteDeadline(now.Add(d.idle))
 }
 
-func copyConnWithIdle(dst, src net.Conn, buf []byte, deadlines proxyDeadlines) error {
+func copyConnWithIdle(dst, src net.Conn, buf []byte, deadlines *proxyDeadlines) error {
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
@@ -402,7 +534,7 @@ func copyConnWithIdle(dst, src net.Conn, buf []byte, deadlines proxyDeadlines) e
 	}
 }
 
-func writeAllWithIdle(dst net.Conn, data []byte, deadlines proxyDeadlines) error {
+func writeAllWithIdle(dst net.Conn, data []byte, deadlines *proxyDeadlines) error {
 	for len(data) > 0 {
 		deadlines.touchWrite(dst)
 		n, err := dst.Write(data)

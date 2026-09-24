@@ -21,3 +21,15 @@ Imported packages `conn`, `tun`, `ipc`, `ratelimiter`, `tai64n` и `rwcancel`
 `6a7c878409f32dc39a82bc597766c81304ab9840`. Эта revision удаляет obsolete
 `PacketBuffer.IsNil()` call и нативно собирается с gVisor
 `v0.0.0-20250503011706-39ed1f5ac29c` на Go 1.24.
+
+## Замечания по клиентскому API
+
+- `ApplyDiscoveredEndpoints` проверяет бандлы только по закреплённому
+  rendezvous-ключу. `PublicDeviceEnroll` закрепляет ключ подписанта из ответа
+  оркестратора; иначе вызовите `SetRendezvousPublicKey(key)` один раз за процесс
+  или передайте `signer_public_key` в `ApplyPublicPlatformConfig`. Отличающийся
+  `public_key` в запросе отвергается, `now` старше 10 минут отвергается,
+  максимальный принятый `seq` запоминается.
+- `socks_listen` должен быть loopback-адресом. Необязательные `socks_username`
+  и `socks_password` включают аутентификацию RFC 1929; `socks_max_conns`
+  ограничивает число одновременных SOCKS-соединений (по умолчанию 1024).

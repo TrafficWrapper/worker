@@ -25,12 +25,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/crypto/curve25519"
 
-	"github.com/TrafficWrapper/worker/agent/internal/bundle"
 	"github.com/TrafficWrapper/worker/agent/internal/protocol"
 	"github.com/TrafficWrapper/worker/core/awg/dialect"
 )
@@ -103,6 +103,8 @@ type envConfig struct {
 	DistributorURL         string
 	EnrollToken            string
 	Capacity               int
+	DisableSmokePeers      bool
+	AllowPrivateEgress     bool
 }
 
 type awgInboundProfile struct {
@@ -121,6 +123,12 @@ func main() {
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]
 	}
+	if cmd == "healthcheck" {
+		if err := runHealthcheck(getenv("AGENT_HEALTH_URL", "http://127.0.0.1:9090/healthz")); err != nil {
+			fatal(err)
+		}
+		return
+	}
 	cfg, err := readEnv()
 	if err != nil {
 		fatal(err)
@@ -137,9 +145,6 @@ func main() {
 		}
 	case "self-describe":
 		st, err := loadBootstrapState(cfg.StateDir)
-		if errors.Is(err, os.ErrNotExist) {
-			st, err = bootstrap(cfg)
-		}
 		if err != nil {
 			fatal(err)
 		}
@@ -155,10 +160,30 @@ func main() {
 	}
 }
 
+func runHealthcheck(url string) error {
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("healthcheck %s: http %d", url, resp.StatusCode)
+	}
+	return nil
+}
+
 func run(cfg envConfig) error {
 	st, err := bootstrap(cfg)
 	if err != nil {
 		return err
+	}
+	var orch *orchClient
+	if cfg.OrchURL != "" {
+		if orch, err = prepareOrchestrator(cfg, st); err != nil {
+			return err
+		}
 	}
 	if cfg.OrchURL == "" {
 		log.Printf("awg reconcile standalone mode: startup pass is best-effort and no periodic orchestrator pass will run")
@@ -178,14 +203,20 @@ func run(cfg envConfig) error {
 	mux.HandleFunc("/pull", standaloneStub("pull", cfg))
 	mux.HandleFunc("/nudge", standaloneStub("nudge", cfg))
 	mux.HandleFunc("/ack", standaloneStub("ack", cfg))
-	mux.HandleFunc("/orchestrator/apply-discovery", applyDiscoveryHandler)
-	mux.HandleFunc("/orchestrator/verify-minisign", verifyMinisignHandler)
 	mux.HandleFunc("/orchestrator/telemetry", telemetryHandler(cfg, st))
 	// Compose publishes the agent port on host loopback by default; keep /metrics
 	// on this local agent surface because peer labels expose public keys/endpoints.
 	mux.HandleFunc("/metrics", metricsHandler(cfg, time.Now()))
 
-	srv := &http.Server{Addr: ":9090", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	srv := &http.Server{
+		Addr:              ":9090",
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -194,8 +225,9 @@ func run(cfg envConfig) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
+	go runDistributorCertRenewal(ctx, cfg)
 	if cfg.OrchURL != "" {
-		go runOrchestratorLoop(ctx, cfg, st)
+		go runOrchestratorLoop(ctx, cfg, st, orch)
 	}
 	log.Printf("worker-agent standalone=%t self_describe=:9090/self-describe orch_url=%q", cfg.OrchURL == "", cfg.OrchURL)
 	err = srv.ListenAndServe()
@@ -206,6 +238,25 @@ func run(cfg envConfig) error {
 }
 
 func telemetryHandler(cfg envConfig, st stateFile) http.HandlerFunc {
+	// One client for the handler's lifetime keeps the HTTPS connection to the
+	// orchestrator alive between telemetry posts.
+	var (
+		clientMu sync.Mutex
+		cached   telemetryClient
+	)
+	getClient := func() (telemetryClient, error) {
+		clientMu.Lock()
+		defer clientMu.Unlock()
+		if cached != nil {
+			return cached, nil
+		}
+		client, err := newTelemetryClient(cfg, st)
+		if err != nil {
+			return nil, err
+		}
+		cached = client
+		return cached, nil
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -226,7 +277,7 @@ func telemetryHandler(cfg envConfig, st stateFile) http.HandlerFunc {
 			http.Error(w, "worker is not enrolled", http.StatusServiceUnavailable)
 			return
 		}
-		client, err := newTelemetryClient(cfg, st)
+		client, err := getClient()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -291,10 +342,22 @@ func readEnv() (envConfig, error) {
 	if err != nil {
 		return envConfig{}, err
 	}
+	xrayPort, err := getenvIntInRange("XRAY_PORT", 2053, 1, 65535)
+	if err != nil {
+		return envConfig{}, err
+	}
+	awgPort, err := getenvIntInRange("AWG_PORT", 51888, 1, 65535)
+	if err != nil {
+		return envConfig{}, err
+	}
+	capacity, err := getenvIntInRange("CAPACITY", 32, 1, 1<<20)
+	if err != nil {
+		return envConfig{}, err
+	}
 	cfg := envConfig{
 		StateDir:               getenv("WORKER_STATE_DIR", stateDirDefault),
-		XrayPort:               getenvInt("XRAY_PORT", 2053),
-		AWGPort:                getenvInt("AWG_PORT", 51888),
+		XrayPort:               xrayPort,
+		AWGPort:                awgPort,
 		AWGSubnet:              subnet,
 		AWGGateway:             getenv("AWG_GATEWAY", gateway),
 		AWGUAPISocket:          getenv("AWG_UAPI_SOCKET", "/var/run/wireguard/awg1.sock"),
@@ -307,7 +370,7 @@ func readEnv() (envConfig, error) {
 		OrchInsecureTLS:        getenv("ORCH_INSECURE_TLS", "0") == "1",
 		WorkerAgentURL:         os.Getenv("WORKER_AGENT_URL"),
 		CamouflageDomain:       os.Getenv("CAMOUFLAGE_DOMAIN"),
-		RealityDest:            getenv("REALITY_DEST", fmt.Sprintf("awg-gw:%d", distributorTLS)),
+		RealityDest:            os.Getenv("REALITY_DEST"),
 		XrayNetwork:            getenv("XRAY_NETWORK", "tcp"),
 		XHTTPPath:              os.Getenv("XRAY_XHTTP_PATH"),
 		XHTTPMode:              os.Getenv("XRAY_XHTTP_MODE"),
@@ -317,8 +380,22 @@ func readEnv() (envConfig, error) {
 		PublicAddress:          os.Getenv("PUBLIC_ADDRESS"),
 		DistributorURL:         getenv("DISTRIBUTOR_URL", fmt.Sprintf("http://awg-gw:%d/tw", distributorTW)),
 		EnrollToken:            os.Getenv("ENROLL_TOKEN"),
-		Capacity:               getenvInt("CAPACITY", 32),
+		Capacity:               capacity,
 	}
+	if cfg.OrchURL != "" && strings.TrimSpace(cfg.OrchStaticPublic) == "" {
+		return envConfig{}, errors.New("ORCH_URL is set but ORCH_STATIC_PUBLIC_KEY is empty")
+	}
+	switch getenv("WORKER_SMOKE_PEERS", "") {
+	case "":
+		cfg.DisableSmokePeers = cfg.OrchURL != ""
+	case "1":
+		cfg.DisableSmokePeers = false
+	case "0":
+		cfg.DisableSmokePeers = true
+	default:
+		return envConfig{}, errors.New("WORKER_SMOKE_PEERS must be 0 or 1")
+	}
+	cfg.AllowPrivateEgress = getenv("WORKER_ALLOW_PRIVATE_EGRESS", "0") == "1"
 	if cfg.MetricsScrubPeerLabels {
 		salt, err := loadMetricsScrubSalt(cfg.StateDir, os.Getenv("TW_METRICS_SCRUB_SALT"))
 		if err != nil {
@@ -342,6 +419,10 @@ func readEnv() (envConfig, error) {
 	cfg.AWGProfiles = profiles
 	if err := validateCamouflageDomain(cfg.CamouflageDomain); err != nil {
 		return envConfig{}, err
+	}
+	cfg.RealityDest = realityDest(cfg.RealityDest, cfg.CamouflageDomain)
+	if isSelfStealDest(cfg.RealityDest) {
+		log.Printf("warning: REALITY_DEST=%s is the internal self-signed fallback; active probes can tell it apart from a real %s", cfg.RealityDest, cfg.CamouflageDomain)
 	}
 	return cfg, nil
 }
@@ -516,6 +597,21 @@ func validateCamouflageDomain(domain string) error {
 	}
 }
 
+// realityDest defaults to the camouflage domain itself, so a REALITY probe
+// without a valid client key is answered by the real site with its real
+// certificate.
+func realityDest(configured, camouflageDomain string) string {
+	if dest := strings.TrimSpace(configured); dest != "" {
+		return dest
+	}
+	return net.JoinHostPort(strings.TrimSpace(camouflageDomain), "443")
+}
+
+func isSelfStealDest(dest string) bool {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(dest))
+	return err == nil && port == strconv.Itoa(distributorTLS) && (host == "awg-gw" || host == "distributor")
+}
+
 func realityNetwork(cfg envConfig) string {
 	switch strings.ToLower(strings.TrimSpace(cfg.XrayNetwork)) {
 	case "xhttp":
@@ -639,7 +735,14 @@ func bootstrap(cfg envConfig) (stateFile, error) {
 		EnrollTokenHash:  enrollHash,
 		SmokeRealityUUID: uuidV4(),
 	}
-	if err := writeJSONFile(path, st, 0o600); err != nil {
+	raw, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return stateFile{}, err
+	}
+	if err := createFileExclusive(path, append(raw, '\n'), 0o600); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return bootstrap(cfg)
+		}
 		return stateFile{}, err
 	}
 	if err := renderAll(cfg, st); err != nil {
@@ -728,16 +831,22 @@ func renderXray(cfg envConfig, st stateFile) error {
 		}
 		return writeXrayConfigBytes(cfg, xrayRaw)
 	}
-	return applyXrayConfigWithRestart(cfg, xrayRaw, len(devices), 0)
+	return applyXrayConfig(cfg, xrayRaw, len(devices))
 }
 
 func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) map[string]any {
-	clients := []any{map[string]any{
-		"id":    st.SmokeRealityUUID,
-		"email": "p0-smoke",
-		"level": 0,
-	}}
-	seen := map[string]struct{}{st.SmokeRealityUUID: {}}
+	clients := []any{}
+	seen := map[string]struct{}{}
+	seenEmails := map[string]struct{}{}
+	if !cfg.DisableSmokePeers {
+		clients = append(clients, map[string]any{
+			"id":    st.SmokeRealityUUID,
+			"email": "p0-smoke",
+			"level": 0,
+		})
+		seen[st.SmokeRealityUUID] = struct{}{}
+		seenEmails["p0-smoke"] = struct{}{}
+	}
 	for _, device := range devices {
 		if device.Status != "approved" || device.RealityUUID == "" {
 			continue
@@ -745,11 +854,18 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		if _, ok := seen[device.RealityUUID]; ok {
 			continue
 		}
-		seen[device.RealityUUID] = struct{}{}
+		// Emails identify users for live add/remove and per-user stats, so
+		// they must be unique within the inbound.
 		email := device.DeviceID
 		if email == "" {
-			email = "device"
+			email = "device-" + device.RealityUUID
 		}
+		if _, ok := seenEmails[email]; ok {
+			log.Printf("approved device %s skipped for REALITY: duplicate device_id", sanitizeLogValue(email))
+			continue
+		}
+		seen[device.RealityUUID] = struct{}{}
+		seenEmails[email] = struct{}{}
 		clients = append(clients, map[string]any{
 			"id":    device.RealityUUID,
 			"email": email,
@@ -798,7 +914,7 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		},
 		"api": map[string]any{
 			"tag":      "api",
-			"services": []string{"StatsService"},
+			"services": []string{"HandlerService", "StatsService"},
 		},
 		"policy": map[string]any{
 			"levels": map[string]any{
@@ -808,16 +924,58 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 				},
 			},
 		},
-		"routing": map[string]any{
-			"rules": []any{map[string]any{
-				"type":        "field",
-				"inboundTag":  []string{"api"},
-				"outboundTag": "api",
-			}},
-		},
-		"stats": map[string]any{},
+		"routing": xrayRouting(cfg),
+		"stats":   map[string]any{},
 	}
 	return xcfg
+}
+
+// privateEgressCIDRs are destinations that clients must not reach through the
+// worker: the Docker network with the agent and distributor, the host, cloud
+// metadata services and other non-public ranges.
+var privateEgressCIDRs = []string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24",
+	"192.168.0.0/16",
+	"198.18.0.0/15",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+	"::/128",
+	"::1/128",
+	"fc00::/7",
+	"fe80::/10",
+	"ff00::/8",
+}
+
+func xrayRouting(cfg envConfig) map[string]any {
+	rules := []any{map[string]any{
+		"type":        "field",
+		"inboundTag":  []string{"api"},
+		"outboundTag": "api",
+	}}
+	if cfg.AllowPrivateEgress {
+		return map[string]any{"rules": rules}
+	}
+	rules = append(rules,
+		map[string]any{
+			"type":        "field",
+			"domain":      []string{"regexp:^[^.]*$", "domain:localhost", "domain:local", "domain:internal"},
+			"outboundTag": "block",
+		},
+		map[string]any{
+			"type":        "field",
+			"ip":          privateEgressCIDRs,
+			"outboundTag": "block",
+		},
+	)
+	// IPIfNonMatch resolves domains before the IP rule, so a public name that
+	// points at a private address is blocked as well.
+	return map[string]any{"domainStrategy": "IPIfNonMatch", "rules": rules}
 }
 
 func writeXrayConfig(cfg envConfig, st stateFile, devices []approvedDevice) (bool, error) {
@@ -914,19 +1072,8 @@ func renderAWG(cfg envConfig, st stateFile) error {
 }
 
 func renderDistributor(cfg envConfig, st stateFile) error {
-	certPath := filepath.Join(cfg.StateDir, "distributor", "certs", "tls.crt")
-	keyPath := filepath.Join(cfg.StateDir, "distributor", "certs", "tls.key")
-	if !fileExists(certPath) || !fileExists(keyPath) {
-		cert, key, err := selfSignedCert(cfg.CamouflageDomain)
-		if err != nil {
-			return err
-		}
-		if err := writeFile(certPath, cert, 0o600); err != nil {
-			return err
-		}
-		if err := writeFile(keyPath, key, 0o600); err != nil {
-			return err
-		}
+	if err := ensureDistributorCert(cfg); err != nil {
+		return err
 	}
 	if orchAppliedSeq(cfg.StateDir) > 0 && fileExists(filepath.Join(cfg.StateDir, "distributor", "tw", "config.json")) {
 		return nil
@@ -944,6 +1091,65 @@ func renderDistributor(cfg envConfig, st stateFile) error {
 		return err
 	}
 	return writeFile(filepath.Join(cfg.StateDir, "distributor", "tw", "placeholder.apk"), []byte("TrafficWrapper P0 placeholder APK\n"), 0o644)
+}
+
+const distributorCertRenewBefore = 30 * 24 * time.Hour
+
+// ensureDistributorCert (re)issues the distributor certificate when it is
+// missing, unreadable, close to expiry or issued for another name. The
+// distributor entrypoint reloads nginx when the files change.
+func ensureDistributorCert(cfg envConfig) error {
+	certPath := filepath.Join(cfg.StateDir, "distributor", "certs", "tls.crt")
+	keyPath := filepath.Join(cfg.StateDir, "distributor", "certs", "tls.key")
+	if fileExists(keyPath) && !distributorCertNeedsRenewal(certPath, cfg.CamouflageDomain, time.Now()) {
+		return nil
+	}
+	cert, key, err := selfSignedCert(cfg.CamouflageDomain)
+	if err != nil {
+		return err
+	}
+	if err := writeFile(keyPath, key, 0o600); err != nil {
+		return err
+	}
+	if err := writeFile(certPath, cert, 0o600); err != nil {
+		return err
+	}
+	log.Printf("distributor certificate issued for %s", cfg.CamouflageDomain)
+	return nil
+}
+
+func distributorCertNeedsRenewal(certPath, name string, now time.Time) bool {
+	raw, err := os.ReadFile(certPath)
+	if err != nil {
+		return true
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return true
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return true
+	}
+	if cert.VerifyHostname(name) != nil {
+		return true
+	}
+	return now.Add(distributorCertRenewBefore).After(cert.NotAfter)
+}
+
+func runDistributorCertRenewal(ctx context.Context, cfg envConfig) {
+	ticker := time.NewTicker(12 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := ensureDistributorCert(cfg); err != nil {
+				log.Printf("distributor certificate renewal failed: %v", err)
+			}
+		}
+	}
 }
 
 func orchAppliedSeq(stateDir string) int64 {
@@ -1108,33 +1314,6 @@ func standaloneStub(action string, cfg envConfig) http.HandlerFunc {
 	}
 }
 
-func applyDiscoveryHandler(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-	var req map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	raw, _ := json.Marshal(req)
-	w.Header().Set("content-type", "application/json")
-	_, _ = w.Write([]byte(bundle.ApplyDiscoveredEndpoints(string(raw))))
-}
-
-func verifyMinisignHandler(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-	var req struct {
-		Message   string `json:"message"`
-		Signature string `json:"signature"`
-		PublicKey string `json:"public_key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	w.Header().Set("content-type", "application/json")
-	_, _ = w.Write([]byte(bundle.VerifyMinisign(req.Message, req.Signature, req.PublicKey)))
-}
-
 func wgKeypair() (privateHex, privateB64, publicB64 string, err error) {
 	priv := make([]byte, 32)
 	if _, err = rand.Read(priv); err != nil {
@@ -1255,23 +1434,29 @@ func firstHost(cidr string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	prefix = prefix.Masked()
 	addr := prefix.Addr()
 	if !addr.Is4() {
 		return "", errors.New("AWG_SUBNET must be IPv4")
 	}
-	raw := addr.As4()
-	raw[3]++
-	return netip.AddrFrom4(raw).String(), nil
+	gateway := addr.Next()
+	if !gateway.IsValid() || !prefix.Contains(gateway) {
+		return "", fmt.Errorf("subnet %s has no usable host", prefix)
+	}
+	return gateway.String(), nil
 }
 
 func secondHostCIDR(cidr string) string {
 	prefix, err := netip.ParsePrefix(cidr)
-	if err != nil {
+	if err != nil || !prefix.Addr().Is4() {
 		return "10.13.13.2/32"
 	}
-	raw := prefix.Addr().As4()
-	raw[3] += 2
-	return netip.AddrFrom4(raw).String() + "/32"
+	prefix = prefix.Masked()
+	host := prefix.Addr().Next().Next()
+	if !host.IsValid() || !prefix.Contains(host) {
+		return "10.13.13.2/32"
+	}
+	return host.String() + "/32"
 }
 
 func prefixLen(cidr string) string {
@@ -1295,24 +1480,60 @@ func outboundIP() string {
 	return host
 }
 
+var egressEchoURLs = []string{"https://api.ipify.org", "https://ifconfig.co/ip", "https://ipinfo.io/ip"}
+
+// detectPublicEgressIP asks several echo services in parallel and only trusts
+// an address reported by at least two of them, like install.sh does. A lone
+// answer is used only when every other service failed.
 func detectPublicEgressIP() string {
-	for _, url := range []string{"https://api.ipify.org", "https://ifconfig.co/ip", "https://ipinfo.io/ip"} {
-		client := http.Client{Timeout: 4 * time.Second}
-		resp, err := client.Get(url)
-		if err != nil {
+	answers := make(chan string, len(egressEchoURLs))
+	for _, url := range egressEchoURLs {
+		url := url
+		go func() {
+			answers <- fetchEchoIP(url)
+		}()
+	}
+	counts := map[string]int{}
+	responded := 0
+	lone := ""
+	for range egressEchoURLs {
+		ip := <-answers
+		if ip == "" {
 			continue
 		}
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		_ = resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			continue
-		}
-		ip := strings.TrimSpace(string(raw))
-		if isPublicIP(ip) {
+		responded++
+		lone = ip
+		counts[ip]++
+		if counts[ip] >= 2 {
 			return ip
 		}
 	}
+	if responded == 1 {
+		log.Printf("egress IP %s confirmed by a single echo service only", lone)
+		return lone
+	}
+	if responded > 1 {
+		log.Printf("egress IP echo services disagree: %v", counts)
+	}
 	return ""
+}
+
+func fetchEchoIP(url string) string {
+	client := http.Client{Timeout: 4 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return ""
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+	_ = resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return ""
+	}
+	ip := strings.TrimSpace(string(raw))
+	if !isPublicIP(ip) {
+		return ""
+	}
+	return ip
 }
 
 func isPublicIP(value string) bool {
@@ -1331,18 +1552,6 @@ func getenv(key, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func getenvInt(key string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
 }
 
 func getenvIntInRange(key string, fallback, minValue, maxValue int) (int, error) {
@@ -1381,14 +1590,86 @@ func writeJSONFile(path string, value any, mode os.FileMode) error {
 }
 
 func writeFile(path string, raw []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, mode); err != nil {
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	if err := writeSyncClose(f, raw, mode); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return syncDir(dir)
+}
+
+// createFileExclusive atomically publishes raw at path only if path does not
+// exist yet, so concurrent bootstraps cannot overwrite each other's keys.
+func createFileExclusive(path string, raw []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if err := writeSyncClose(f, raw, mode); err != nil {
+		return err
+	}
+	if err := os.Link(tmp, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return err
+		}
+		// Some bind-mounted filesystems do not support hard links; O_EXCL still
+		// guarantees a single winner, only without an atomic content swap.
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if err != nil {
+			return err
+		}
+		if err := writeSyncClose(f, raw, mode); err != nil {
+			_ = os.Remove(path)
+			return err
+		}
+	}
+	return syncDir(dir)
+}
+
+func writeSyncClose(f *os.File, raw []byte, mode os.FileMode) error {
+	if _, err := f.Write(raw); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
+		return err
+	}
+	return nil
 }
 
 func fileExists(path string) bool {

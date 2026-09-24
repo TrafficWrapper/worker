@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 func TestApplyDiscoveredEndpointsMergesAWGWithStoredSecrets(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	base := testBaseConfig(t)
 	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
 	req := signer.request(t, bundle, base, 9, "2026-06-13T12:00:00Z")
@@ -65,6 +67,7 @@ func TestApplyDiscoveredEndpointsMergesAWGWithStoredSecrets(t *testing.T) {
 
 func TestApplyDiscoveredEndpointsRejectsTamperedSignedBundle(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
 	message := mustJSON(t, bundle)
 	signature := signer.sign(message)
@@ -79,6 +82,7 @@ func TestApplyDiscoveredEndpointsRejectsTamperedSignedBundle(t *testing.T) {
 
 func TestApplyDiscoveredEndpointsRejectsHostnameAWGWithoutEgressIP(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	base := testBaseConfig(t)
 	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
 	awg := bundle["endpoints"].(map[string]any)["awg"].([]any)[0].(map[string]any)
@@ -96,6 +100,7 @@ func TestApplyDiscoveredEndpointsRejectsHostnameAWGWithoutEgressIP(t *testing.T)
 
 func TestApplyDiscoveredEndpointsRejectsWrongSignature(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	other := newTestSigner(t)
 	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
 	message := mustJSON(t, bundle)
@@ -107,20 +112,156 @@ func TestApplyDiscoveredEndpointsRejectsWrongSignature(t *testing.T) {
 	}
 }
 
-func TestApplyDiscoveredEndpointsRequiresPublicKey(t *testing.T) {
+func TestApplyDiscoveredEndpointsUsesPinnedKeyWhenRequestOmitsIt(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
 	message := mustJSON(t, bundle)
 	req := requestJSON(t, "", message, signer.sign(message), testBaseConfig(t), 9, "2026-06-13T12:00:00Z")
 
 	result := decodeApplyResult(t, ApplyDiscoveredEndpoints(req))
-	if result.OK || !strings.Contains(result.Error, "public_key is required") {
-		t.Fatalf("missing public key accepted or wrong error: %+v", result)
+	if !result.OK {
+		t.Fatalf("pinned key was not used: %+v", result)
+	}
+}
+
+func TestApplyDiscoveredEndpointsRequiresPinnedKey(t *testing.T) {
+	signer := newTestSigner(t)
+	resetDiscoveryTrust(t)
+	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
+	req := signer.request(t, bundle, testBaseConfig(t), 9, "2026-06-13T12:00:00Z")
+
+	result := decodeApplyResult(t, ApplyDiscoveredEndpoints(req))
+	if result.OK || !strings.Contains(result.Error, "not pinned") {
+		t.Fatalf("request-supplied key trusted without pin or wrong error: %+v", result)
+	}
+}
+
+func TestApplyDiscoveredEndpointsRejectsRequestKeyDifferentFromPinned(t *testing.T) {
+	pinned := newTestSigner(t)
+	pinTestSigner(t, pinned)
+	attacker := newTestSigner(t)
+	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
+	req := attacker.request(t, bundle, testBaseConfig(t), 9, "2026-06-13T12:00:00Z")
+
+	result := decodeApplyResult(t, ApplyDiscoveredEndpoints(req))
+	if result.OK || !strings.Contains(result.Error, "does not match pinned key") {
+		t.Fatalf("foreign key accepted or wrong error: %+v", result)
+	}
+}
+
+func TestSetRendezvousPublicKeyRefusesToReplacePinnedKey(t *testing.T) {
+	first := newTestSigner(t)
+	pinTestSigner(t, first)
+	if got := decodeMinisignResult(t, SetRendezvousPublicKey(first.publicKey)); !got.OK {
+		t.Fatalf("re-pinning same key failed: %+v", got)
+	}
+	second := newTestSigner(t)
+	if got := decodeMinisignResult(t, SetRendezvousPublicKey(second.publicKey)); got.OK {
+		t.Fatal("different key replaced pinned key")
+	}
+	if got := decodeMinisignResult(t, SetRendezvousPublicKey("garbage")); got.OK {
+		t.Fatal("invalid key accepted")
+	}
+	if err := pinRendezvousPublicKey(second.publicKey, true); err != nil {
+		t.Fatalf("authenticated re-enrollment could not rotate key: %v", err)
+	}
+}
+
+func TestApplyDiscoveredEndpointsRejectsStaleNow(t *testing.T) {
+	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
+	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T11:00:00Z")
+	req := signer.request(t, bundle, testBaseConfig(t), 9, "2026-06-13T10:30:00Z")
+
+	result := decodeApplyResult(t, ApplyDiscoveredEndpoints(req))
+	if result.OK || !strings.Contains(result.Error, "too far behind") {
+		t.Fatalf("stale now accepted or wrong error: %+v", result)
+	}
+}
+
+func TestApplyDiscoveredEndpointsDefaultsNowToClock(t *testing.T) {
+	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
+	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T11:00:00Z")
+	req := signer.request(t, bundle, testBaseConfig(t), 9, "")
+
+	result := decodeApplyResult(t, ApplyDiscoveredEndpoints(req))
+	if result.OK || !strings.Contains(result.Error, "expired") {
+		t.Fatalf("expired bundle accepted without now or wrong error: %+v", result)
+	}
+}
+
+func TestApplyDiscoveredEndpointsRemembersMaxSeenSeq(t *testing.T) {
+	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
+	newer := testBundle(t, 20, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
+	if result := decodeApplyResult(t, ApplyDiscoveredEndpoints(signer.request(t, newer, testBaseConfig(t), 0, ""))); !result.OK {
+		t.Fatalf("newer bundle rejected: %+v", result)
+	}
+	older := testBundle(t, 15, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
+	result := decodeApplyResult(t, ApplyDiscoveredEndpoints(signer.request(t, older, testBaseConfig(t), 0, "")))
+	if result.OK || !strings.Contains(result.Error, "rollback") {
+		t.Fatalf("rollback below stored max_seen_seq accepted: %+v", result)
+	}
+}
+
+func TestApplyDiscoveredEndpointsCallerBaseDoesNotTouchPendingProvision(t *testing.T) {
+	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
+	stored := setPendingProvision(t, testBaseConfig(t), "")
+	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
+	result := decodeApplyResult(t, ApplyDiscoveredEndpoints(signer.request(t, bundle, testBaseConfig(t), 0, "")))
+	if !result.OK {
+		t.Fatalf("apply failed: %+v", result)
+	}
+	pendingProvision.Lock()
+	got := pendingProvision.configJSON
+	pendingProvision.Unlock()
+	if got != stored {
+		t.Fatal("caller-supplied base_config_json overwrote pendingProvision")
+	}
+}
+
+func TestApplyDiscoveredEndpointsUpdatesPendingProvisionAtomically(t *testing.T) {
+	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
+	setPendingProvision(t, testBaseConfig(t), "")
+	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
+	req := signer.request(t, bundle, "", 0, "")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if result := decodeApplyResult(t, ApplyDiscoveredEndpoints(req)); !result.OK {
+				t.Errorf("apply failed: %+v", result)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			pendingProvision.Lock()
+			_ = pendingProvision.configJSON
+			pendingProvision.Unlock()
+		}()
+	}
+	wg.Wait()
+	pendingProvision.Lock()
+	got := pendingProvision.configJSON
+	pendingProvision.Unlock()
+	var merged config
+	if err := json.Unmarshal([]byte(got), &merged); err != nil {
+		t.Fatal(err)
+	}
+	if merged.Endpoint != "198.51.100.50:51821" {
+		t.Fatalf("pending endpoint=%q", merged.Endpoint)
 	}
 }
 
 func TestApplyDiscoveredEndpointsRejectsExpiredBundle(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T11:00:00Z")
 	req := signer.request(t, bundle, testBaseConfig(t), 9, "2026-06-13T12:00:00Z")
 
@@ -132,6 +273,7 @@ func TestApplyDiscoveredEndpointsRejectsExpiredBundle(t *testing.T) {
 
 func TestApplyDiscoveredEndpointsRejectsRollback(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	bundle := testBundle(t, 9, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
 	req := signer.request(t, bundle, testBaseConfig(t), 10, "2026-06-13T12:00:00Z")
 
@@ -143,6 +285,7 @@ func TestApplyDiscoveredEndpointsRejectsRollback(t *testing.T) {
 
 func TestApplyDiscoveredEndpointsRejectsWrongNamespace(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
 	bundle["ns"] = "version-v1"
 	req := signer.request(t, bundle, testBaseConfig(t), 9, "2026-06-13T12:00:00Z")
@@ -155,6 +298,7 @@ func TestApplyDiscoveredEndpointsRejectsWrongNamespace(t *testing.T) {
 
 func TestApplyDiscoveredEndpointsRejectsPublicBundleSecrets(t *testing.T) {
 	signer := newTestSigner(t)
+	pinTestSigner(t, signer)
 	bundle := testBundle(t, 10, "2026-06-13T10:00:00Z", "2026-06-13T22:00:00Z")
 	awg := bundle["endpoints"].(map[string]any)["awg"].([]any)[0].(map[string]any)
 	awg["psk2"] = testKey(8)
@@ -164,6 +308,55 @@ func TestApplyDiscoveredEndpointsRejectsPublicBundleSecrets(t *testing.T) {
 	if result.OK || !strings.Contains(result.Error, "forbidden discovery field") {
 		t.Fatalf("secret-bearing bundle accepted or wrong error: %+v", result)
 	}
+}
+
+var testDiscoveryNow = time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
+
+func resetDiscoveryTrust(t *testing.T) {
+	t.Helper()
+	discoveryTrust.Lock()
+	oldKey, oldSeq := discoveryTrust.publicKey, discoveryTrust.maxSeenSeq
+	discoveryTrust.publicKey, discoveryTrust.maxSeenSeq = "", 0
+	discoveryTrust.Unlock()
+	oldClock := discoveryClock
+	discoveryClock = func() time.Time { return testDiscoveryNow }
+	t.Cleanup(func() {
+		discoveryClock = oldClock
+		discoveryTrust.Lock()
+		discoveryTrust.publicKey, discoveryTrust.maxSeenSeq = oldKey, oldSeq
+		discoveryTrust.Unlock()
+	})
+}
+
+func pinTestSigner(t *testing.T, signer testSigner) {
+	t.Helper()
+	resetDiscoveryTrust(t)
+	if err := pinRendezvousPublicKey(signer.publicKey, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setPendingProvision(t *testing.T, configJSON, awgRUConfigJSON string) string {
+	t.Helper()
+	pendingProvision.Lock()
+	oldConfig, oldAWGRU := pendingProvision.configJSON, pendingProvision.awgRUConfigJSON
+	pendingProvision.configJSON, pendingProvision.awgRUConfigJSON = configJSON, awgRUConfigJSON
+	pendingProvision.Unlock()
+	t.Cleanup(func() {
+		pendingProvision.Lock()
+		pendingProvision.configJSON, pendingProvision.awgRUConfigJSON = oldConfig, oldAWGRU
+		pendingProvision.Unlock()
+	})
+	return configJSON
+}
+
+func decodeMinisignResult(t *testing.T, raw string) minisignVerifyResult {
+	t.Helper()
+	var result minisignVerifyResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("decode minisign result %s: %v", raw, err)
+	}
+	return result
 }
 
 type testSigner struct {
@@ -303,11 +496,12 @@ func testKey(seed byte) string {
 var testDiscoveredServerKey = testKey(4)
 
 func TestDiscoveryNowUsesUTC(t *testing.T) {
-	got, err := discoveryNow("2026-06-13T12:00:00+03:00")
+	resetDiscoveryTrust(t)
+	got, err := discoveryNow("2026-06-13T15:00:00+03:00")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := time.Date(2026, 6, 13, 9, 0, 0, 0, time.UTC)
+	want := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	if !got.Equal(want) {
 		t.Fatalf("got %s, want %s", got, want)
 	}

@@ -151,7 +151,12 @@ func startNamed(name, configJSON string) (*status, error) {
 		inst.close()
 		return nil, fmt.Errorf("device up: %w", err)
 	}
-	socks, err := startSOCKSServer(cfg.SOCKSListen, tnet)
+	socks, err := startSOCKSServer(socksOptions{
+		listen:   cfg.SOCKSListen,
+		username: cfg.SOCKSUsername,
+		password: cfg.SOCKSPassword,
+		maxConns: cfg.SOCKSMaxConns,
+	}, tnet)
 	if err != nil {
 		inst.close()
 		return nil, err

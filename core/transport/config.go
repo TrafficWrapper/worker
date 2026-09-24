@@ -30,6 +30,9 @@ type config struct {
 	PSK2            string   `json:"psk2"`
 	AWGPreset       preset   `json:"awg_preset"`
 	SOCKSListen     string   `json:"socks_listen,omitempty"`
+	SOCKSUsername   string   `json:"socks_username,omitempty"`
+	SOCKSPassword   string   `json:"socks_password,omitempty"`
+	SOCKSMaxConns   int      `json:"socks_max_conns,omitempty"`
 	MTU             int      `json:"mtu,omitempty"`
 	DNSServers      []string `json:"dns_servers,omitempty"`
 }
@@ -53,6 +56,27 @@ func parseConfig(configJSON string) (normalizedConfig, error) {
 	}
 	if cfg.PrivateKey == "" || cfg.InternalIP == "" || cfg.Endpoint == "" || cfg.ServerPublicKey == "" || cfg.PSK2 == "" {
 		return normalizedConfig{}, errors.New("config is incomplete")
+	}
+	for name, value := range map[string]string{
+		"private_key":       cfg.PrivateKey,
+		"internal_ip":       cfg.InternalIP,
+		"endpoint":          cfg.Endpoint,
+		"server_public_key": cfg.ServerPublicKey,
+		"psk2":              cfg.PSK2,
+		"socks_listen":      cfg.SOCKSListen,
+	} {
+		if strings.ContainsAny(value, "\r\n\x00") {
+			return normalizedConfig{}, fmt.Errorf("%s contains line break or NUL", name)
+		}
+	}
+	if err := validateSOCKSListen(cfg.SOCKSListen); err != nil {
+		return normalizedConfig{}, err
+	}
+	if err := validateSOCKSAuth(cfg.SOCKSUsername, cfg.SOCKSPassword); err != nil {
+		return normalizedConfig{}, err
+	}
+	if cfg.SOCKSMaxConns < 0 {
+		return normalizedConfig{}, fmt.Errorf("socks_max_conns must be non-negative, got %d", cfg.SOCKSMaxConns)
 	}
 	endpoint, err := normalizeEndpoint(cfg.Endpoint)
 	if err != nil {
@@ -92,6 +116,34 @@ func parseConfig(configJSON string) (normalizedConfig, error) {
 		dns = append(dns, addr)
 	}
 	return normalizedConfig{config: cfg, localAddr: prefix.Addr(), dnsServers: dns}, nil
+}
+
+func validateSOCKSListen(listen string) error {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("socks_listen %q: %w", listen, err)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil || !addr.IsLoopback() {
+		return fmt.Errorf("socks_listen %q must be a loopback address", listen)
+	}
+	return nil
+}
+
+func validateSOCKSAuth(username, password string) error {
+	if username == "" && password == "" {
+		return nil
+	}
+	if username == "" || password == "" {
+		return errors.New("socks_username and socks_password must be set together")
+	}
+	if len(username) > 255 || len(password) > 255 {
+		return errors.New("socks_username and socks_password must be at most 255 bytes")
+	}
+	return nil
 }
 
 func normalizeEndpoint(endpoint string) (string, error) {

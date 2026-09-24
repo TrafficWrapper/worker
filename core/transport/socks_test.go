@@ -409,3 +409,206 @@ func tcpPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 	}
 	return nil, nil
 }
+
+func TestSOCKSUserPassAuthAcceptsValidCredentials(t *testing.T) {
+	client, serverConn := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() { done <- socksHandshake(serverConn, "user", "secret") }()
+
+	if _, err := client.Write([]byte{socksVersion5, 0x02, socksNoAuth, socksUserPassAuth}); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(client, reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply[1] != socksUserPassAuth {
+		t.Fatalf("selected method=%#x want username/password", reply[1])
+	}
+	if _, err := client.Write(socksUserPassRequest("user", "secret")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(client, reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply[0] != socksUserPassVersion || reply[1] != 0x00 {
+		t.Fatalf("auth reply=%v want success", reply)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+}
+
+func TestSOCKSUserPassAuthRejectsWrongPassword(t *testing.T) {
+	client, serverConn := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() { done <- socksHandshake(serverConn, "user", "secret") }()
+
+	if _, err := client.Write([]byte{socksVersion5, 0x01, socksUserPassAuth}); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(client, reply); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(socksUserPassRequest("user", "wrong")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(client, reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply[1] == 0x00 {
+		t.Fatal("wrong password accepted")
+	}
+	if err := <-done; err == nil {
+		t.Fatal("handshake succeeded with wrong password")
+	}
+}
+
+func TestSOCKSUserPassAuthRejectsNoAuthClient(t *testing.T) {
+	client, serverConn := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() { done <- socksHandshake(serverConn, "user", "secret") }()
+
+	if _, err := client.Write([]byte{socksVersion5, 0x01, socksNoAuth}); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(client, reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply[1] != socksNoAcceptableAuth {
+		t.Fatalf("method=%#x want 0xff", reply[1])
+	}
+	if err := <-done; err == nil {
+		t.Fatal("no-auth client accepted when credentials are configured")
+	}
+}
+
+func TestSOCKSServerRejectsConnectionsOverLimit(t *testing.T) {
+	server, err := startSOCKSServer(socksOptions{listen: "127.0.0.1:0", maxConns: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.close()
+
+	first, err := net.Dial("tcp", server.addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := first.Write([]byte{socksVersion5, 0x01, socksNoAuth}); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(first, reply); err != nil {
+		t.Fatalf("first connection handshake: %v", err)
+	}
+
+	second, err := net.Dial("tcp", server.addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	_ = second.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := second.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection over limit was served")
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatal("connection over limit was left open")
+	}
+
+	_ = first.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		third, err := net.Dial("tcp", server.addr())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = third.Write([]byte{socksVersion5, 0x01, socksNoAuth})
+		_ = third.SetReadDeadline(time.Now().Add(time.Second))
+		_, err = io.ReadFull(third, reply)
+		_ = third.Close()
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("slot was not released after first connection closed: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestProxyDeadlinesAreThrottled(t *testing.T) {
+	left := &deadlineCountingConn{}
+	right := &deadlineCountingConn{}
+	d := newProxyDeadlines(left, right, time.Minute)
+	for i := 0; i < 1000; i++ {
+		d.touchRead()
+		d.touchWrite(left)
+		d.touchWrite(right)
+	}
+	if got := left.reads.Load(); got != 1 {
+		t.Fatalf("left SetReadDeadline calls=%d want 1", got)
+	}
+	if got := left.writes.Load(); got != 1 {
+		t.Fatalf("left SetWriteDeadline calls=%d want 1", got)
+	}
+	if got := right.writes.Load(); got != 1 {
+		t.Fatalf("right SetWriteDeadline calls=%d want 1", got)
+	}
+	d.lastRead.Store(time.Now().Add(-2 * time.Second).UnixNano())
+	d.touchRead()
+	if got := right.reads.Load(); got != 2 {
+		t.Fatalf("right SetReadDeadline calls=%d want 2 after refresh interval", got)
+	}
+}
+
+func TestSOCKSProxyActiveSessionOutlivesIdleTimeout(t *testing.T) {
+	oldIdle := socksProxyIdleTimeout
+	socksProxyIdleTimeout = 200 * time.Millisecond
+	defer func() { socksProxyIdleTimeout = oldIdle }()
+
+	leftClient, leftProxy := tcpPair(t)
+	rightClient, rightProxy := tcpPair(t)
+	defer leftClient.Close()
+	defer rightClient.Close()
+	go func() { _ = proxy(context.Background(), leftProxy, rightProxy) }()
+
+	buf := make([]byte, 1)
+	for i := 0; i < 20; i++ {
+		if _, err := leftClient.Write([]byte{byte(i)}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		_ = rightClient.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err := io.ReadFull(rightClient, buf); err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func socksUserPassRequest(username, password string) []byte {
+	req := []byte{socksUserPassVersion, byte(len(username))}
+	req = append(req, username...)
+	req = append(req, byte(len(password)))
+	return append(req, password...)
+}
+
+type deadlineCountingConn struct {
+	net.Conn
+	reads  atomic.Int32
+	writes atomic.Int32
+}
+
+func (c *deadlineCountingConn) SetReadDeadline(time.Time) error {
+	c.reads.Add(1)
+	return nil
+}
+
+func (c *deadlineCountingConn) SetWriteDeadline(time.Time) error {
+	c.writes.Add(1)
+	return nil
+}

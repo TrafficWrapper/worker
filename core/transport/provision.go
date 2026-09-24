@@ -46,6 +46,8 @@ type deviceEnrollAPIRequest struct {
 	RequestKeys             bool   `json:"request_keys,omitempty"`
 	SOCKSListen             string `json:"socks_listen,omitempty"`
 	AWGRUSOCKSListen        string `json:"awg_ru_socks_listen,omitempty"`
+	SOCKSUsername           string `json:"socks_username,omitempty"`
+	SOCKSPassword           string `json:"socks_password,omitempty"`
 	MTU                     int    `json:"mtu,omitempty"`
 	TimeoutSeconds          int64  `json:"timeout_seconds,omitempty"`
 	ExpectedServerAWGKey    string `json:"expected_server_awg_public,omitempty"`
@@ -235,6 +237,8 @@ func deviceEnroll(req deviceEnrollAPIRequest) (provisionAPIResult, error) {
 		PSK2:            resp.PSK2,
 		AWGPreset:       preset(resp.AWGPreset),
 		SOCKSListen:     req.SOCKSListen,
+		SOCKSUsername:   req.SOCKSUsername,
+		SOCKSPassword:   req.SOCKSPassword,
 		MTU:             req.MTU,
 	}
 	raw, err := json.Marshal(cfg)
@@ -262,6 +266,8 @@ func deviceEnroll(req deviceEnrollAPIRequest) (provisionAPIResult, error) {
 			PSK2:            resp.AWGRU.PSK2,
 			AWGPreset:       preset(resp.AWGRU.AWGPreset),
 			SOCKSListen:     req.AWGRUSOCKSListen,
+			SOCKSUsername:   req.SOCKSUsername,
+			SOCKSPassword:   req.SOCKSPassword,
 			MTU:             req.MTU,
 		}
 		raw, err := json.Marshal(cfg)

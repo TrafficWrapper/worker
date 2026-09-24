@@ -2,7 +2,10 @@ package transport
 
 import (
 	"fmt"
+	"log"
+	"reflect"
 	"strings"
+	"sync"
 	"unsafe"
 
 	netstacktun "github.com/amnezia-vpn/amneziawg-go/tun/netstack"
@@ -23,8 +26,45 @@ type netstackTUNView struct {
 	stack *stack.Stack
 }
 
+var netstackLayout struct {
+	once sync.Once
+	err  error
+}
+
+func checkNetstackLayout() error {
+	netstackLayout.once.Do(func() {
+		netstackLayout.err = compareStructPrefix(
+			reflect.TypeOf(netstacktun.Net{}),
+			reflect.TypeOf(netstackTUNView{}),
+		)
+	})
+	return netstackLayout.err
+}
+
+func compareStructPrefix(actual, view reflect.Type) error {
+	if actual.Kind() != reflect.Struct || view.Kind() != reflect.Struct {
+		return fmt.Errorf("netstack layout: %s or %s is not a struct", actual, view)
+	}
+	if actual.NumField() < view.NumField() {
+		return fmt.Errorf("netstack layout: %s has %d fields, want at least %d", actual, actual.NumField(), view.NumField())
+	}
+	for i := 0; i < view.NumField(); i++ {
+		want := view.Field(i)
+		got := actual.Field(i)
+		if got.Name != want.Name || got.Type != want.Type || got.Offset != want.Offset {
+			return fmt.Errorf("netstack layout: field %d is %s %s@%d, want %s %s@%d",
+				i, got.Name, got.Type, got.Offset, want.Name, want.Type, want.Offset)
+		}
+	}
+	return nil
+}
+
 func tuneNetstack(tnet *netstacktun.Net) error {
 	if tnet == nil {
+		return nil
+	}
+	if err := checkNetstackLayout(); err != nil {
+		log.Printf("transport: skipping netstack tuning: %v", err)
 		return nil
 	}
 	st := (*netstackTUNView)(unsafe.Pointer(tnet)).stack

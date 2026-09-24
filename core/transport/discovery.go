@@ -6,14 +6,28 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"aead.dev/minisign"
 )
 
 const (
-	rendezvousNamespace = "rendezvous-v1"
-	rendezvousSchema    = 2
-	rendezvousPubkey    = ""
+	rendezvousNamespace    = "rendezvous-v1"
+	rendezvousSchema       = 2
+	rendezvousPubkey       = ""
+	discoveryMaxClockSkew  = 10 * time.Minute
+	rendezvousKeyMismatch  = "rendezvous public key does not match pinned key"
+	rendezvousKeyNotPinned = "rendezvous public key is not pinned"
 )
+
+var discoveryClock = time.Now
+
+var discoveryTrust struct {
+	sync.Mutex
+	publicKey  string
+	maxSeenSeq int64
+}
 
 var forbiddenDiscoveryKeys = map[string]struct{}{
 	"internal_ip":        {},
@@ -102,9 +116,9 @@ func applyDiscoveredEndpoints(requestJSON string) (applyDiscoveredResult, error)
 	if strings.TrimSpace(signature) == "" {
 		return applyDiscoveredResult{}, errors.New("endpoints minisig is required")
 	}
-	pubkey := strings.TrimSpace(req.PublicKey)
-	if pubkey == "" {
-		return applyDiscoveredResult{}, errors.New("public_key is required")
+	pubkey, storedMaxSeq, err := discoveryTrustSnapshot(req.PublicKey)
+	if err != nil {
+		return applyDiscoveredResult{}, err
 	}
 	if err := verifyMinisignResult(req.EndpointsJSON, signature, pubkey); err != nil {
 		return applyDiscoveredResult{}, err
@@ -120,7 +134,7 @@ func applyDiscoveredEndpoints(requestJSON string) (applyDiscoveredResult, error)
 	if err != nil {
 		return applyDiscoveredResult{}, err
 	}
-	if err := validateDiscoveredBundle(bundle, req.MaxSeenSeq, now); err != nil {
+	if err := validateDiscoveredBundle(bundle, max(storedMaxSeq, req.MaxSeenSeq), now); err != nil {
 		return applyDiscoveredResult{}, err
 	}
 	awg, err := selectAWGEndpoint(bundle.Endpoints.AWG)
@@ -128,22 +142,32 @@ func applyDiscoveredEndpoints(requestJSON string) (applyDiscoveredResult, error)
 		return applyDiscoveredResult{}, err
 	}
 	reality := selectRealityEndpoint(bundle.Endpoints.Reality)
-	baseJSON := req.BaseConfigJSON
-	if baseJSON == "" {
+	var mergedJSON string
+	if req.BaseConfigJSON != "" {
+		mergedJSON, err = mergeDiscoveredAWGConfig(req.BaseConfigJSON, awg)
+		if err != nil {
+			return applyDiscoveredResult{}, err
+		}
+		if err := recordDiscoveredSeq(pubkey, bundle.Seq); err != nil {
+			return applyDiscoveredResult{}, err
+		}
+	} else {
 		pendingProvision.Lock()
-		baseJSON = pendingProvision.configJSON
+		if pendingProvision.configJSON == "" {
+			pendingProvision.Unlock()
+			return applyDiscoveredResult{}, errors.New("provisioned config is missing")
+		}
+		mergedJSON, err = mergeDiscoveredAWGConfig(pendingProvision.configJSON, awg)
+		if err == nil {
+			err = recordDiscoveredSeq(pubkey, bundle.Seq)
+		}
+		if err != nil {
+			pendingProvision.Unlock()
+			return applyDiscoveredResult{}, err
+		}
+		pendingProvision.configJSON = mergedJSON
 		pendingProvision.Unlock()
 	}
-	if baseJSON == "" {
-		return applyDiscoveredResult{}, errors.New("provisioned config is missing")
-	}
-	mergedJSON, err := mergeDiscoveredAWGConfig(baseJSON, awg)
-	if err != nil {
-		return applyDiscoveredResult{}, err
-	}
-	pendingProvision.Lock()
-	pendingProvision.configJSON = mergedJSON
-	pendingProvision.Unlock()
 	result := applyDiscoveredResult{
 		OK:         true,
 		Seq:        bundle.Seq,
@@ -154,6 +178,106 @@ func applyDiscoveredEndpoints(requestJSON string) (applyDiscoveredResult, error)
 		result.EgressIP = reality.EgressIP
 	}
 	return result, nil
+}
+
+// SetRendezvousPublicKey pins the minisign key that authenticates rendezvous
+// bundles. A different key cannot replace an already pinned one.
+func SetRendezvousPublicKey(publicKey string) string {
+	if err := pinRendezvousPublicKey(publicKey, false); err != nil {
+		return encodeMinisignVerifyResult(minisignVerifyResult{OK: false, Error: err.Error()})
+	}
+	return encodeMinisignVerifyResult(minisignVerifyResult{OK: true})
+}
+
+func pinRendezvousPublicKey(publicKey string, replace bool) error {
+	publicKey, err := canonicalRendezvousKey(publicKey)
+	if err != nil {
+		return err
+	}
+	builtin, err := builtinRendezvousKey()
+	if err != nil {
+		return err
+	}
+	if builtin != "" && publicKey != builtin {
+		return errors.New(rendezvousKeyMismatch)
+	}
+	discoveryTrust.Lock()
+	defer discoveryTrust.Unlock()
+	if discoveryTrust.publicKey == publicKey {
+		return nil
+	}
+	if discoveryTrust.publicKey != "" && !replace {
+		return errors.New(rendezvousKeyMismatch)
+	}
+	discoveryTrust.publicKey = publicKey
+	discoveryTrust.maxSeenSeq = 0
+	return nil
+}
+
+func canonicalRendezvousKey(publicKey string) (string, error) {
+	publicKey = strings.TrimSpace(publicKey)
+	if publicKey == "" {
+		return "", errors.New("rendezvous public key is empty")
+	}
+	var parsed minisign.PublicKey
+	if err := parsed.UnmarshalText([]byte(publicKey)); err != nil {
+		return "", errors.New("invalid rendezvous public key")
+	}
+	return parsed.String(), nil
+}
+
+func builtinRendezvousKey() (string, error) {
+	if rendezvousPubkey == "" {
+		return "", nil
+	}
+	return canonicalRendezvousKey(rendezvousPubkey)
+}
+
+func pinnedRendezvousKeyLocked() (string, error) {
+	if discoveryTrust.publicKey != "" {
+		return discoveryTrust.publicKey, nil
+	}
+	return builtinRendezvousKey()
+}
+
+func discoveryTrustSnapshot(requestKey string) (string, int64, error) {
+	discoveryTrust.Lock()
+	pinned, err := pinnedRendezvousKeyLocked()
+	maxSeenSeq := discoveryTrust.maxSeenSeq
+	discoveryTrust.Unlock()
+	if err != nil {
+		return "", 0, err
+	}
+	if pinned == "" {
+		return "", 0, errors.New(rendezvousKeyNotPinned)
+	}
+	if strings.TrimSpace(requestKey) != "" {
+		requested, err := canonicalRendezvousKey(requestKey)
+		if err != nil {
+			return "", 0, err
+		}
+		if requested != pinned {
+			return "", 0, errors.New(rendezvousKeyMismatch)
+		}
+	}
+	return pinned, maxSeenSeq, nil
+}
+
+func recordDiscoveredSeq(pubkey string, seq int64) error {
+	discoveryTrust.Lock()
+	defer discoveryTrust.Unlock()
+	pinned, err := pinnedRendezvousKeyLocked()
+	if err != nil {
+		return err
+	}
+	if pinned != pubkey {
+		return errors.New(rendezvousKeyMismatch)
+	}
+	if seq < discoveryTrust.maxSeenSeq {
+		return fmt.Errorf("rendezvous rollback: seq=%d max_seen_seq=%d", seq, discoveryTrust.maxSeenSeq)
+	}
+	discoveryTrust.maxSeenSeq = seq
+	return nil
 }
 
 func validateDiscoveredBundle(bundle discoveredBundle, maxSeenSeq int64, now time.Time) error {
@@ -242,14 +366,19 @@ func selectRealityEndpoint(endpoints []discoveredRealityEndpoint) *discoveredRea
 }
 
 func discoveryNow(value string) (time.Time, error) {
+	current := discoveryClock().UTC()
 	if strings.TrimSpace(value) == "" {
-		return time.Now().UTC(), nil
+		return current, nil
 	}
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("now: %w", err)
 	}
-	return parsed.UTC(), nil
+	parsed = parsed.UTC()
+	if parsed.Before(current.Add(-discoveryMaxClockSkew)) {
+		return time.Time{}, fmt.Errorf("now %s is too far behind current time", parsed.Format(time.RFC3339))
+	}
+	return parsed, nil
 }
 
 func parseRendezvousTime(value string, field string) (time.Time, error) {

@@ -10,9 +10,17 @@ import (
 	"time"
 )
 
-type awgUsageState map[string]awgUsageSnapshot
+// usageStateRetention bounds usage state files: entries for devices or keys
+// that have not been seen for this long are dropped.
+const usageStateRetention = 90 * 24 * time.Hour
 
-type awgUsageSnapshot struct {
+type usageState map[string]usageSnapshot
+
+type awgUsageState = usageState
+
+type awgUsageSnapshot = usageSnapshot
+
+type usageSnapshot struct {
 	RxBytes     uint64    `json:"rx_bytes,omitempty"`
 	TxBytes     uint64    `json:"tx_bytes,omitempty"`
 	LastRxBytes uint64    `json:"last_rx_bytes,omitempty"`
@@ -39,7 +47,9 @@ func collectAWGUsageReports(cfg envConfig, devices []approvedDevice) ([]orchUsag
 		return nil, nil
 	}
 	state := loadAWGUsageState(cfg.StateDir)
-	reports, next := buildAWGUsageReports(devices, allPeers, state, time.Now().UTC())
+	now := time.Now().UTC()
+	reports, next := buildAWGUsageReports(devices, allPeers, state, now)
+	next.prune(now)
 	if err := saveAWGUsageState(cfg.StateDir, next); err != nil {
 		log.Printf("awg usage state save failed: %v", err)
 	}
@@ -149,22 +159,38 @@ func awgUsageStatePath(stateDir string) string {
 	return filepath.Join(stateDir, "awg", "usage.json")
 }
 
-func loadAWGUsageState(stateDir string) awgUsageState {
-	raw, err := os.ReadFile(awgUsageStatePath(stateDir))
-	if err != nil {
-		return awgUsageState{}
+func (state usageState) prune(now time.Time) {
+	for key, snap := range state {
+		if !snap.UpdatedAt.IsZero() && now.Sub(snap.UpdatedAt) > usageStateRetention {
+			delete(state, key)
+		}
 	}
-	var state awgUsageState
+}
+
+func loadAWGUsageState(stateDir string) awgUsageState {
+	return loadUsageState(awgUsageStatePath(stateDir))
+}
+
+func saveAWGUsageState(stateDir string, state awgUsageState) error {
+	return saveUsageState(awgUsageStatePath(stateDir), state)
+}
+
+func loadUsageState(path string) usageState {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return usageState{}
+	}
+	var state usageState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		log.Printf("awg usage state ignored: %v", err)
-		return awgUsageState{}
+		log.Printf("usage state %s ignored: %v", path, err)
+		return usageState{}
 	}
 	if state == nil {
-		return awgUsageState{}
+		return usageState{}
 	}
 	return state
 }
 
-func saveAWGUsageState(stateDir string, state awgUsageState) error {
-	return writeJSONFile(awgUsageStatePath(stateDir), state, 0o600)
+func saveUsageState(path string, state usageState) error {
+	return writeJSONFile(path, state, 0o600)
 }

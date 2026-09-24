@@ -3,7 +3,9 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -21,24 +24,177 @@ const metricsScrubSaltFile = "metrics_salt"
 var (
 	quotaBlocksTotal        atomic.Uint64
 	awgPeerPolicyDriftTotal atomic.Uint64
+	uapiErrorsTotal         atomic.Uint64
+	dockerExecErrorsTotal   atomic.Uint64
+
+	orchAppliedSeqGauge     atomic.Int64
+	orchDesiredSeqGauge     atomic.Int64
+	orchLastSuccessUnix     atomic.Int64
+	approvedDevicesGauge    atomic.Int64
+	applyDurationMillis     atomic.Int64
+	awgReconcileMillisTotal atomic.Int64
+
+	orchRequestsTotal = newCounterVec()
+	xrayApplyTotal    = newCounterVec()
 )
+
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
+// counterVec is a minimal labelled counter keyed by a rendered label set.
+type counterVec struct {
+	mu     sync.Mutex
+	values map[string]uint64
+}
+
+func newCounterVec() *counterVec {
+	return &counterVec{values: map[string]uint64{}}
+}
+
+func (c *counterVec) inc(labels string) {
+	c.mu.Lock()
+	c.values[labels]++
+	c.mu.Unlock()
+}
+
+func (c *counterVec) get(labels string) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.values[labels]
+}
+
+func (c *counterVec) snapshot() map[string]uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]uint64, len(c.values))
+	for k, v := range c.values {
+		out[k] = v
+	}
+	return out
+}
+
+func orchRequestLabels(op, result string) string {
+	return fmt.Sprintf("{op=%q,result=%q}", op, result)
+}
+
+func recordOrchRequest(op string, err error) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	} else {
+		orchLastSuccessUnix.Store(time.Now().Unix())
+	}
+	orchRequestsTotal.inc(orchRequestLabels(op, result))
+}
+
+func recordXrayApply(mode string) {
+	xrayApplyTotal.inc(fmt.Sprintf("{mode=%q}", mode))
+}
+
+// metricsWriter groups samples by family so every family is emitted once with
+// its HELP and TYPE lines, as the Prometheus text format expects.
+type metricsWriter struct {
+	order    []string
+	families map[string]*metricFamily
+}
+
+type metricFamily struct {
+	help    string
+	typ     string
+	samples []string
+}
+
+func newMetricsWriter() *metricsWriter {
+	return &metricsWriter{families: map[string]*metricFamily{}}
+}
+
+func (m *metricsWriter) add(name, typ, help, labels string, value any) {
+	family, ok := m.families[name]
+	if !ok {
+		family = &metricFamily{help: help, typ: typ}
+		m.families[name] = family
+		m.order = append(m.order, name)
+	}
+	family.samples = append(family.samples, fmt.Sprintf("%s%s %v", name, labels, value))
+}
+
+func (m *metricsWriter) writeTo(w io.Writer) {
+	for _, name := range m.order {
+		family := m.families[name]
+		_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", name, family.help, name, family.typ)
+		for _, sample := range family.samples {
+			_, _ = fmt.Fprintln(w, sample)
+		}
+	}
+}
 
 func metricsHandler(cfg envConfig, startedAt time.Time) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", metricsContentType)
-		_, _ = fmt.Fprintf(w, "awg_peer_policy_drift_total %d\n", awgPeerPolicyDriftTotal.Load())
+		m := newMetricsWriter()
+		writeAgentMetrics(m, cfg)
+		opts := metricsOptions{ScrubPeerLabels: cfg.MetricsScrubPeerLabels, Salt: cfg.MetricsScrubSalt}
 		for _, snapshot := range collectAWGProfilePeerSnapshots(cfg) {
 			if snapshot.Error != "" {
-				_, _ = fmt.Fprintf(w, "tw_worker_awg_interface_up{interface=%q} 0\n", snapshot.Interface)
-				_, _ = fmt.Fprintf(w, "tw_worker_awg_scrape_error{interface=%q,error=%q} 1\n", snapshot.Interface, snapshot.Error)
+				m.add("tw_worker_awg_interface_up", "gauge", "AWG interface answers UAPI.", fmt.Sprintf("{interface=%q}", snapshot.Interface), 0)
+				m.add("tw_worker_awg_scrape_error", "gauge", "AWG UAPI scrape failed.", fmt.Sprintf("{interface=%q,error=%q}", snapshot.Interface, snapshot.Error), 1)
 				continue
 			}
-			writeAWGMetricsWithOptions(w, snapshot.Interface, startedAt, snapshot.Peers, metricsOptions{
-				ScrubPeerLabels: cfg.MetricsScrubPeerLabels,
-				Salt:            cfg.MetricsScrubSalt,
-			})
+			addAWGMetrics(m, snapshot.Interface, startedAt, snapshot.Peers, opts)
 		}
+		m.writeTo(w)
 	}
+}
+
+func writeAgentMetrics(m *metricsWriter, cfg envConfig) {
+	m.add("tw_worker_build_info", "gauge", "Worker agent build information.", fmt.Sprintf("{version=%q}", version), 1)
+	m.add("awg_peer_policy_drift_total", "counter", "AWG peer policy drifts repaired by reconcile.", "", awgPeerPolicyDriftTotal.Load())
+	m.add("tw_worker_uapi_errors_total", "counter", "Failed AWG UAPI operations.", "", uapiErrorsTotal.Load())
+	m.add("tw_worker_docker_exec_errors_total", "counter", "Failed docker exec calls into the Xray container.", "", dockerExecErrorsTotal.Load())
+	m.add("tw_worker_orch_applied_seq", "gauge", "Worker config sequence applied by this worker.", "", orchAppliedSeqGauge.Load())
+	m.add("tw_worker_orch_desired_seq", "gauge", "Latest worker config sequence announced by the orchestrator.", "", orchDesiredSeqGauge.Load())
+	m.add("tw_worker_orch_last_success_timestamp_seconds", "gauge", "Unix time of the last successful orchestrator request.", "", orchLastSuccessUnix.Load())
+	m.add("tw_worker_approved_devices", "gauge", "Unexpired approved devices in the applied config.", "", approvedDevicesGauge.Load())
+	m.add("tw_worker_apply_duration_seconds", "gauge", "Duration of the last worker config apply.", "", float64(applyDurationMillis.Load())/1000)
+	m.add("tw_worker_awg_reconcile_seconds_total", "counter", "Total time spent in periodic AWG reconcile.", "", float64(awgReconcileMillisTotal.Load())/1000)
+	for _, labels := range sortedKeys(orchRequestsTotal.snapshot()) {
+		m.add("tw_worker_orch_requests_total", "counter", "Orchestrator requests by operation and result.", labels, orchRequestsTotal.get(labels))
+	}
+	for _, labels := range sortedKeys(xrayApplyTotal.snapshot()) {
+		m.add("tw_worker_xray_apply_total", "counter", "Xray config applies by mode (live, restart, failed).", labels, xrayApplyTotal.get(labels))
+	}
+	if expiry, ok := distributorCertExpiry(cfg); ok {
+		m.add("tw_worker_distributor_cert_expiry_seconds", "gauge", "Seconds until the distributor certificate expires.", "", int64(time.Until(expiry).Seconds()))
+	}
+	m.add("tw_worker_quota_blocks_total", "counter", "Quota blocks reported by the orchestrator.", "", quotaBlocksTotal.Load())
+}
+
+func sortedKeys(values map[string]uint64) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func distributorCertExpiry(cfg envConfig) (time.Time, bool) {
+	if cfg.StateDir == "" {
+		return time.Time{}, false
+	}
+	raw, err := os.ReadFile(filepath.Join(cfg.StateDir, "distributor", "certs", "tls.crt"))
+	if err != nil {
+		return time.Time{}, false
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return time.Time{}, false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return cert.NotAfter, true
 }
 
 func writeAWGMetrics(w io.Writer, iface string, startedAt time.Time, peers []awgPeerConfig) {
@@ -51,10 +207,19 @@ type metricsOptions struct {
 }
 
 func writeAWGMetricsWithOptions(w io.Writer, iface string, startedAt time.Time, peers []awgPeerConfig, opts metricsOptions) {
-	_, _ = fmt.Fprintf(w, "tw_worker_awg_interface_up{interface=%q} 1\n", iface)
-	_, _ = fmt.Fprintf(w, "tw_worker_awg_peer_count{interface=%q} %d\n", iface, len(peers))
-	_, _ = fmt.Fprintf(w, "tw_worker_awg_metrics_uptime_seconds{interface=%q} %.0f\n", iface, time.Since(startedAt).Seconds())
-	_, _ = fmt.Fprintf(w, "tw_worker_quota_blocks_total{interface=%q} %d\n", iface, quotaBlocksTotal.Load())
+	m := newMetricsWriter()
+	addAWGMetrics(m, iface, startedAt, peers, opts)
+	m.writeTo(w)
+}
+
+func addAWGMetrics(m *metricsWriter, iface string, startedAt time.Time, peers []awgPeerConfig, opts metricsOptions) {
+	ifaceLabel := fmt.Sprintf("{interface=%q}", iface)
+	m.add("tw_worker_awg_interface_up", "gauge", "AWG interface answers UAPI.", ifaceLabel, 1)
+	m.add("tw_worker_awg_peer_count", "gauge", "Configured AWG peers.", ifaceLabel, len(peers))
+	m.add("tw_worker_awg_metrics_uptime_seconds", "gauge", "Seconds since the agent started.", ifaceLabel, fmt.Sprintf("%.0f", time.Since(startedAt).Seconds()))
+	// Kept per interface for existing dashboards; the unlabelled series is the
+	// canonical one.
+	m.add("tw_worker_quota_blocks_total", "counter", "Quota blocks reported by the orchestrator.", ifaceLabel, quotaBlocksTotal.Load())
 	for _, peer := range peers {
 		allowedIPs := append([]string(nil), peer.AllowedIPs...)
 		sort.Strings(allowedIPs)
@@ -66,13 +231,14 @@ func writeAWGMetricsWithOptions(w io.Writer, iface string, startedAt time.Time, 
 		if !opts.ScrubPeerLabels {
 			labels += fmt.Sprintf(",allowed_ip=%q,endpoint=%q", strings.Join(allowedIPs, ","), peer.Endpoint)
 		}
-		_, _ = fmt.Fprintf(w, "awg_peer_rx_bytes{%s} %d\n", labels, peer.RxBytes)
-		_, _ = fmt.Fprintf(w, "awg_peer_tx_bytes{%s} %d\n", labels, peer.TxBytes)
-		_, _ = fmt.Fprintf(w, "awg_peer_persistent_keepalive_seconds{%s} %d\n", labels, peer.PersistentKeepalive)
+		labels = "{" + labels + "}"
+		m.add("awg_peer_rx_bytes", "counter", "Bytes received from the AWG peer.", labels, peer.RxBytes)
+		m.add("awg_peer_tx_bytes", "counter", "Bytes sent to the AWG peer.", labels, peer.TxBytes)
+		m.add("awg_peer_persistent_keepalive_seconds", "gauge", "Server-side persistent keepalive of the AWG peer.", labels, peer.PersistentKeepalive)
 		// With server-side persistent keepalive disabled, an idle AWG peer's
 		// handshake age is not a server-side liveness signal; external alerts
 		// must not treat this metric as proof that the peer is offline.
-		_, _ = fmt.Fprintf(w, "awg_peer_last_handshake_time_seconds{%s} %d\n", labels, peer.LastHandshakeSec)
+		m.add("awg_peer_last_handshake_time_seconds", "gauge", "Unix time of the last AWG handshake with the peer.", labels, peer.LastHandshakeSec)
 	}
 }
 

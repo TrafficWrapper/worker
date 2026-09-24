@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	mathrand "math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -161,19 +162,55 @@ func prepareOrchestrator(cfg envConfig, st stateFile) (*orchClient, error) {
 	return client, nil
 }
 
+const (
+	orchBackoffMin = time.Second
+	orchBackoffMax = time.Minute
+	// orchMinHeartbeatInterval keeps a nudge endpoint that answers instantly
+	// (no long-poll) from turning the loop into a busy loop.
+	orchMinHeartbeatInterval = 5 * time.Second
+	// orchForcedPullInterval re-checks the config even when nudges keep
+	// reporting nothing new.
+	orchForcedPullInterval = 10 * time.Minute
+)
+
+// backoff is an exponential delay with full jitter, reset after success.
+type backoff struct {
+	min, max, current time.Duration
+}
+
+func newBackoff(min, max time.Duration) *backoff {
+	return &backoff{min: min, max: max}
+}
+
+func (b *backoff) next() time.Duration {
+	if b.current == 0 {
+		b.current = b.min
+	} else {
+		b.current *= 2
+		if b.current > b.max {
+			b.current = b.max
+		}
+	}
+	return b.current/2 + time.Duration(mathrand.Int64N(int64(b.current/2)+1))
+}
+
+func (b *backoff) reset() {
+	b.current = 0
+}
+
 func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, client *orchClient) {
 	state := loadOrchState(cfg.StateDir)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
+	orchAppliedSeqGauge.Store(state.AppliedSeq)
+	retry := newBackoff(orchBackoffMin, orchBackoffMax)
+	var lastAck, lastPull time.Time
+	pullNeeded := true
+	for ctx.Err() == nil {
 		if state.WorkerID == "" {
 			resp, err := client.enroll(cfg.EnrollToken, selfDescribe(cfg, st))
+			recordOrchRequest("enroll", err)
 			if err != nil {
 				log.Printf("orch enroll failed: %v", err)
-				sleepCtx(ctx, 5*time.Second)
+				sleepCtx(ctx, retry.next())
 				continue
 			}
 			state.WorkerID = resp.WorkerID
@@ -182,52 +219,93 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			_ = saveOrchState(cfg.StateDir, state)
 			log.Printf("orch enroll status=%s worker_id=%s", state.Status, state.WorkerID)
 		}
-		pull, err := client.pull(state.WorkerID, state.AppliedSeq)
-		if err != nil {
-			log.Printf("orch pull failed: %v", err)
-			sleepCtx(ctx, 5*time.Second)
-			continue
-		}
-		if !pull.OK {
-			state.Status = pull.Status
-			_ = saveOrchState(cfg.StateDir, state)
-			log.Printf("orch pull pending/error status=%s error=%s", pull.Status, pull.Error)
-			sleepCtx(ctx, 3*time.Second)
-			continue
-		}
-		state.Status = pull.Status
-		if pull.NotModified {
-			_ = saveOrchState(cfg.StateDir, state)
-			nudge, err := client.nudge(state.WorkerID, state.AppliedSeq, selfDescribe(cfg, st))
+		if pullNeeded || time.Since(lastPull) >= orchForcedPullInterval {
+			pull, err := client.pull(state.WorkerID, state.AppliedSeq)
+			recordOrchRequest("pull", err)
 			if err != nil {
-				log.Printf("orch nudge failed: %v", err)
-				sleepCtx(ctx, 5*time.Second)
-			} else if nudge.DesiredSeq <= state.AppliedSeq {
-				log.Printf("orch nudge heartbeat desired=%d applied=%d", nudge.DesiredSeq, state.AppliedSeq)
+				log.Printf("orch pull failed: %v", err)
+				sleepCtx(ctx, retry.next())
+				continue
 			}
+			lastPull = time.Now()
+			if pull.DesiredSeq > 0 {
+				orchDesiredSeqGauge.Store(pull.DesiredSeq)
+			}
+			if !pull.OK {
+				state.Status = pull.Status
+				_ = saveOrchState(cfg.StateDir, state)
+				log.Printf("orch pull pending/error status=%s error=%s", pull.Status, pull.Error)
+				sleepCtx(ctx, retry.next())
+				continue
+			}
+			state.Status = pull.Status
+			if !pull.NotModified {
+				started := time.Now()
+				seq, clientSeq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)
+				applyDurationMillis.Store(time.Since(started).Milliseconds())
+				if err != nil {
+					log.Printf("orch apply rejected: %v", err)
+					sleepCtx(ctx, retry.next())
+					continue
+				}
+				state.AppliedSeq = seq
+				state.ClientAppliedSeq = clientSeq
+				_ = saveOrchState(cfg.StateDir, state)
+				orchAppliedSeqGauge.Store(seq)
+				if orchDesiredSeqGauge.Load() < seq {
+					orchDesiredSeqGauge.Store(seq)
+				}
+				log.Printf("orch applied seq=%d in %s", seq, time.Since(started).Round(time.Millisecond))
+				reportOrchAck(client, cfg, st, state.WorkerID, seq)
+				lastAck = time.Now()
+				retry.reset()
+				continue
+			}
+			_ = saveOrchState(cfg.StateDir, state)
+			pullNeeded = false
+			retry.reset()
+		}
+		started := time.Now()
+		nudge, err := client.nudge(state.WorkerID, state.AppliedSeq, selfDescribe(cfg, st))
+		recordOrchRequest("nudge", err)
+		if err != nil {
+			log.Printf("orch nudge failed: %v", err)
+			pullNeeded = true
+			sleepCtx(ctx, retry.next())
+			continue
+		}
+		retry.reset()
+		if nudge.DesiredSeq > 0 {
+			orchDesiredSeqGauge.Store(nudge.DesiredSeq)
+		}
+		if nudge.DesiredSeq > state.AppliedSeq {
+			pullNeeded = true
+		} else {
+			logDebugf("orch nudge heartbeat desired=%d applied=%d", nudge.DesiredSeq, state.AppliedSeq)
+		}
+		if time.Since(lastAck) >= cfg.OrchAckInterval {
 			reportOrchAck(client, cfg, st, state.WorkerID, state.AppliedSeq)
+			reconcileStarted := time.Now()
 			if err := reconcileAWGPeers(cfg, st); err != nil {
 				log.Printf("awg periodic reconcile incomplete: %v", err)
 			}
-			continue
+			awgReconcileMillisTotal.Add(time.Since(reconcileStarted).Milliseconds())
+			lastAck = time.Now()
 		}
-		seq, clientSeq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)
-		if err != nil {
-			log.Printf("orch apply rejected: %v", err)
-			sleepCtx(ctx, 5*time.Second)
-			continue
+		if !pullNeeded {
+			if elapsed := time.Since(started); elapsed < orchMinHeartbeatInterval {
+				sleepCtx(ctx, orchMinHeartbeatInterval-elapsed)
+			}
 		}
-		state.AppliedSeq = seq
-		state.ClientAppliedSeq = clientSeq
-		_ = saveOrchState(cfg.StateDir, state)
-		reportOrchAck(client, cfg, st, state.WorkerID, seq)
-		sleepCtx(ctx, 5*time.Second)
 	}
 }
 
 func reportOrchAck(client *orchClient, cfg envConfig, st stateFile, workerID string, seq int64) {
-	usage := collectWorkerUsageReports(cfg, cachedApprovedDevices(cfg.StateDir))
+	devices := cachedApprovedDevices(cfg.StateDir)
+	approvedDevicesGauge.Store(int64(len(filterUnexpiredApprovedDevices(devices, time.Now().UTC()))))
+	usage := collectWorkerUsageReports(cfg, devices)
 	ack, err := client.ack(workerID, seq, cfg.EgressIP, selfDescribe(cfg, st), usage)
+	recordOrchRequest("ack", err)
 	if err != nil {
 		log.Printf("orch ack failed: %v", err)
 		return
@@ -235,7 +313,13 @@ func reportOrchAck(client *orchClient, cfg envConfig, st stateFile, workerID str
 	if ack.QuotaBlocks > 0 {
 		quotaBlocksTotal.Add(uint64(ack.QuotaBlocks))
 	}
-	log.Printf("orch ack ok applied=%d desired=%d egress_probe=%s match=%t", ack.AppliedSeq, ack.DesiredSeq, ack.EgressIPProbe, ack.EgressMatch)
+	if ack.DesiredSeq > 0 {
+		orchDesiredSeqGauge.Store(ack.DesiredSeq)
+	}
+	logDebugf("orch ack ok applied=%d desired=%d egress_probe=%s match=%t", ack.AppliedSeq, ack.DesiredSeq, ack.EgressIPProbe, ack.EgressMatch)
+	if !ack.EgressMatch && ack.EgressIPProbe != "" {
+		log.Printf("orch reports egress mismatch: observed=%s configured=%s", ack.EgressIPProbe, cfg.EgressIP)
+	}
 }
 
 func collectWorkerUsageReports(cfg envConfig, devices []approvedDevice) []orchUsageReport {

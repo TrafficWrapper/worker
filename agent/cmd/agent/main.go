@@ -105,6 +105,7 @@ type envConfig struct {
 	Capacity               int
 	DisableSmokePeers      bool
 	AllowPrivateEgress     bool
+	OrchAckInterval        time.Duration
 }
 
 type awgInboundProfile struct {
@@ -396,6 +397,11 @@ func readEnv() (envConfig, error) {
 		return envConfig{}, errors.New("WORKER_SMOKE_PEERS must be 0 or 1")
 	}
 	cfg.AllowPrivateEgress = getenv("WORKER_ALLOW_PRIVATE_EGRESS", "0") == "1"
+	ackInterval, err := time.ParseDuration(getenv("ORCH_ACK_INTERVAL", "90s"))
+	if err != nil || ackInterval < 10*time.Second || ackInterval > time.Hour {
+		return envConfig{}, errors.New("ORCH_ACK_INTERVAL must be a duration between 10s and 1h")
+	}
+	cfg.OrchAckInterval = ackInterval
 	if cfg.MetricsScrubPeerLabels {
 		salt, err := loadMetricsScrubSalt(cfg.StateDir, os.Getenv("TW_METRICS_SCRUB_SALT"))
 		if err != nil {

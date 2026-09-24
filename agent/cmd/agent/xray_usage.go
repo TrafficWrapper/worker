@@ -188,6 +188,14 @@ func queryXrayStatsViaDocker(cfg envConfig) ([]byte, error) {
 }
 
 func execInXrayContainer(cfg envConfig, command []string, timeout time.Duration) ([]byte, error) {
+	out, err := execInXrayContainerOnce(cfg, command, timeout)
+	if err != nil {
+		dockerExecErrorsTotal.Add(1)
+	}
+	return out, err
+}
+
+func execInXrayContainerOnce(cfg envConfig, command []string, timeout time.Duration) ([]byte, error) {
 	client := dockerUnixClient(cfg.DockerSocket, timeout)
 	for _, candidate := range dockerContainerNameCandidates(cfg.XrayContainer) {
 		stdout, err := dockerExec(client, candidate, command)

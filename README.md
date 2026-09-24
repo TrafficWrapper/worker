@@ -146,7 +146,9 @@ binaries:
 | `ORCH_INSECURE_TLS` | Allows insecure TLS to the orchestrator for local dev. Required when ORCH uses the default self-signed `ORCH_TLS=1`. | Required for self-signed ORCH | `0` | Set `1` for test/self-signed ORCH only; keep `0` with real production TLS. |
 | `PUBLIC_ADDRESS` | Public DNS name or IP advertised to clients. | Optional | detected egress IP | `worker1.example.com` or a public IPv4. |
 | `EGRESS_IP` | Explicit public egress IP advertised to clients and sent in worker ack. Overrides persisted bootstrap state. | Optional | public echo-IP probe, then local route fallback | Set if auto-detection is wrong. |
-| `CAPACITY` | Capacity hint reported to the orchestrator. | Optional | `32` | Any positive integer. |
+| `CAPACITY` | Capacity hint reported to the orchestrator. | Optional | `32` | Any positive integer; invalid values stop the agent. |
+| `WORKER_ALLOW_PRIVATE_EGRESS` | Lets VPN clients reach private, loopback, link-local (cloud metadata) and Docker-internal addresses through the worker. | Optional | `0` | Keep `0`: both Xray routing and the `awg-gw` forward filter block those ranges. |
+| `WORKER_SMOKE_PEERS` | Built-in smoke credentials (`p0-smoke` REALITY user and AWG smoke peer). | Optional | enabled standalone, disabled with `ORCH_URL` | `1` to keep them on an orchestrated worker for `awg-smoke`, `0` to disable. |
 | `XRAY_PORT` | Public TCP port mapped to the REALITY container. | Optional | `2053` | `8444`, `2053`, or another free TCP port. |
 | `AWG_PORT` | Public UDP port mapped to AWG. | Optional | `51888` | Any free UDP port. |
 | `AGENT_PORT` | Localhost TCP port exposing the worker agent health/API. | Optional | `9090` | `127.0.0.1:9090` by default. |
@@ -154,12 +156,12 @@ binaries:
 | `AWG_GATEWAY` | AWG gateway address inside `AWG_SUBNET`. | Optional | first host in subnet | `10.13.13.1`. |
 | `AWG_UAPI_SOCKET` | WireGuard/AmneziaWG UAPI socket path. | Optional | `/var/run/wireguard/awg1.sock` | Usually set by Compose. |
 | `AWG_SERVER_KEEPALIVE` | Server-side persistent keepalive policy for every AWG peer. | Optional | `0` | Runtime rollback: set the previous value, then restart both `agent` and `awg-gw`. |
-| `XRAY_CONTAINER_NAME` | Docker container name used by the agent to restart/rewrite Xray after approved-device changes. | Optional | `worker-xray-1` | Compose sets a stable `container_name` with this value; override only if you also change the xray service container name. |
+| `XRAY_CONTAINER_NAME` | Docker container the agent uses for Xray user updates. Device changes are applied live through the Xray API; other config changes restart the container. Fallback discovery is limited to the agent's own compose project. | Optional | `worker-xray-1` | Compose sets a stable `container_name` with this value; override only if you also change the xray service container name. |
 | `DOCKER_SOCKET` | Docker socket path used by the agent. | Optional | `/var/run/docker.sock` | Compose mounts the host Docker socket. |
 | `DISTRIBUTOR_URL` | Internal URL of the `/tw/` distributor. | Optional | `http://awg-gw:8080/tw` | Keep default for Compose. |
 | `WORKER_AGENT_URL` | Public/internal URL override for agent self-reference. | Optional | empty | Set only for custom deployments. |
 | `CAMOUFLAGE_DOMAIN` | REALITY serverName/camouflage SNI and fallback identity. | Required for REALITY | empty, refused until set | Use a real TLS 1.3 domain that fits your deployment; `example.com` and `example.org` are rejected. |
-| `REALITY_DEST` | REALITY fallback destination. | Optional | `awg-gw:9443` | Keep default for self-steal, or set `host:443`. |
+| `REALITY_DEST` | REALITY fallback destination for probes without a valid client key. | Optional | `CAMOUFLAGE_DOMAIN:443` | Keep the default so probes see the real site. `awg-gw:9443` is an internal self-signed fallback that active probing can fingerprint; use it only for tests. |
 | `XRAY_NETWORK` | Xray REALITY stream network. | Optional | `tcp` | Set `xhttp` only when the operator configures matching XHTTP params on this worker. |
 | `XRAY_XHTTP_PATH` | XHTTP path used when `XRAY_NETWORK=xhttp`. | Optional | empty | Operator-chosen path; no public default. |
 | `XRAY_XHTTP_MODE` | XHTTP mode used when `XRAY_NETWORK=xhttp`. | Optional | empty | Passed through to Xray `xhttpSettings.mode`. |
@@ -176,7 +178,7 @@ binaries:
 | `SERVICE_NAME` | `awg-gw` stub/debug service name. | Optional | `awg-gw` | Only for stub/manual runs. |
 | `AWG_LISTEN_UDP` | `awg-gw` stub/debug UDP listen value. | Optional | `51821` | Only for stub/manual runs. |
 | `AWG_ENDPOINT` | Endpoint used by the `awg-smoke` profile. | Optional | `host.docker.internal:51888` | Set to the worker public endpoint for remote smoke tests. |
-| `TW_SMOKE_URL` | HTTP URL probed by `awg-smoke` through AWG. | Optional | `http://10.13.13.1/tw/healthz` | Any URL reachable through the tunnel. |
+| `TW_SMOKE_URL` | HTTP URL probed by `awg-smoke` through AWG. | Optional | `http://10.13.13.1:8080/tw/config.json` | Any URL reachable through the tunnel. |
 | `AWG_CLIENT_PRIVATE_KEY` | Overrides smoke client private key. | Optional | generated state value | Secret; use only for smoke debugging. |
 | `AWG_CLIENT_PSK` | Overrides smoke client PSK. | Optional | generated state value | Secret; use only for smoke debugging. |
 | `AWG_CLIENT_IP` | Overrides smoke client internal IP. | Optional | generated state value | Example `10.13.13.250`. |
@@ -201,6 +203,9 @@ operator confirmation described by the deployment plan.
 - Never commit `.env`, `worker-state/`, generated AWG keys, Xray configs, or APK
   artifacts.
 - Use a unique deployment dialect; the worker state is generated locally.
+- Clients cannot reach private, loopback, link-local or Docker-internal
+  addresses through the worker (agent API, `/metrics`, the host, cloud metadata)
+  unless `WORKER_ALLOW_PRIVATE_EGRESS=1`.
 - Keep `APPLY_NFT=0` while testing. Review firewall/NAT rules before enabling it
   on a production server.
 - Worker enrollment tokens are one-time secrets; create them in the orchestrator

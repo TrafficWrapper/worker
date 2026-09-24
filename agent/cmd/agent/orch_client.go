@@ -147,16 +147,21 @@ type orchUpdateArtifact struct {
 	APKBase64       string `json:"apk_base64,omitempty"`
 }
 
-func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile) {
-	if cfg.OrchStaticPublic == "" {
-		log.Printf("orch disabled: ORCH_STATIC_PUBLIC_KEY is empty")
-		return
-	}
+// prepareOrchestrator validates the orchestrator settings up front so a
+// misconfigured worker exits with a clear error instead of running a silently
+// disabled orchestrator loop.
+func prepareOrchestrator(cfg envConfig, st stateFile) (*orchClient, error) {
 	client, err := newOrchClient(cfg, st)
 	if err != nil {
-		log.Printf("orch client init failed: %v", err)
-		return
+		return nil, fmt.Errorf("orchestrator client: %w", err)
 	}
+	if loadOrchState(cfg.StateDir).WorkerID == "" && strings.TrimSpace(cfg.EnrollToken) == "" {
+		return nil, errors.New("worker is not enrolled and ENROLL_TOKEN is empty")
+	}
+	return client, nil
+}
+
+func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, client *orchClient) {
 	state := loadOrchState(cfg.StateDir)
 	for {
 		select {
@@ -165,10 +170,6 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile) {
 		default:
 		}
 		if state.WorkerID == "" {
-			if cfg.EnrollToken == "" {
-				log.Printf("orch enroll skipped: ENROLL_TOKEN is empty")
-				return
-			}
 			resp, err := client.enroll(cfg.EnrollToken, selfDescribe(cfg, st))
 			if err != nil {
 				log.Printf("orch enroll failed: %v", err)
@@ -449,7 +450,19 @@ func writeUpdateArtifact(cfg envConfig, update *orchUpdateArtifact) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(update.APKSHA256) != "" && sha256HexBytes(apkRaw) != strings.ToLower(strings.TrimSpace(update.APKSHA256)) {
+	update.APKBase64 = ""
+	// The APK must match the hash inside the signed manifest that clients
+	// verify; otherwise a manifest and an unrelated APK could be published
+	// together.
+	apkSHA := sha256HexBytes(apkRaw)
+	manifestSHA, err := updateManifestAPKSHA256(update.ManifestJSON)
+	if err != nil {
+		return err
+	}
+	if apkSHA != manifestSHA {
+		return errors.New("update artifact sha does not match manifest")
+	}
+	if declared := strings.ToLower(strings.TrimSpace(update.APKSHA256)); declared != "" && declared != apkSHA {
 		return errors.New("update artifact sha mismatch")
 	}
 	twDir := filepath.Join(cfg.StateDir, "distributor", "tw")
@@ -460,6 +473,21 @@ func writeUpdateArtifact(cfg envConfig, update *orchUpdateArtifact) error {
 		return err
 	}
 	return writeFile(filepath.Join(twDir, apkName), apkRaw, 0o644)
+}
+
+func updateManifestAPKSHA256(manifestJSON string) (string, error) {
+	var root map[string]any
+	if err := json.Unmarshal([]byte(manifestJSON), &root); err != nil {
+		return "", fmt.Errorf("parse update manifest: %w", err)
+	}
+	if nested, ok := root["distributed_apk"].(map[string]any); ok {
+		root = nested
+	}
+	sha := strings.ToLower(stringFromAny(root["apk_sha256"]))
+	if len(sha) != 64 {
+		return "", errors.New("update manifest has no apk_sha256")
+	}
+	return sha, nil
 }
 
 func verifyOrchBundle(bundle orchSignedConfig, pinnedPublicKey string, maxSeen int64, expectedNS string) (int64, error) {

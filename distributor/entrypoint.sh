@@ -18,4 +18,20 @@ sed "s/__AWG_GATEWAY__/${AWG_GATEWAY}/g" \
   /etc/nginx/templates/worker.conf.template \
   >/etc/nginx/conf.d/default.conf
 
+cert_stamp() {
+  stat -c '%Y' /worker-state/distributor/certs/tls.crt /worker-state/distributor/certs/tls.key 2>/dev/null | tr '\n' ' '
+}
+
+# The agent renews the certificate in place; reload nginx when it changes.
+(
+  last=$(cert_stamp)
+  while sleep 300; do
+    now=$(cert_stamp)
+    if [ "$now" != "$last" ]; then
+      sleep 5
+      nginx -s reload && last=$(cert_stamp)
+    fi
+  done
+) &
+
 exec nginx -g 'daemon off;'

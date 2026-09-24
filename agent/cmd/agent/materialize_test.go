@@ -184,10 +184,43 @@ func TestWriteAWGPeerRegistryForAdditionalProfile(t *testing.T) {
 	}
 }
 
-func TestApprovedDevicesRejectIncomplete(t *testing.T) {
-	_, err := approvedDevicesFromWorkerConfig(`{"desired_state":{"approved_devices":[{"device_id":"bad","status":"approved"}]}}`)
-	if err == nil {
-		t.Fatal("incomplete approved device accepted")
+func TestApprovedDevicesSkipInvalidWithoutBlockingOthers(t *testing.T) {
+	good := `{"device_id":"good","reality_uuid":"4fad2182-6de3-4407-bf8f-d8c688160ce6","awg_public_key":"` + keyB64(5) + `","internal_ip":"10.13.13.10","psk2":"` + keyB64(6) + `","status":"approved"}`
+	bad := []string{
+		`{"device_id":"incomplete","status":"approved"}`,
+		`{"device_id":"bad-key","reality_uuid":"4fad2182-6de3-4407-bf8f-d8c688160ce7","awg_public_key":"nope","internal_ip":"10.13.13.11/32","psk2":"` + keyB64(6) + `","status":"approved"}`,
+		`{"device_id":"bad-ip","reality_uuid":"4fad2182-6de3-4407-bf8f-d8c688160ce8","awg_public_key":"` + keyB64(7) + `","internal_ip":"10.13.13.12/32\nallowed_ip=0.0.0.0/0","psk2":"` + keyB64(6) + `","status":"approved"}`,
+		`{"device_id":"wide-ip","reality_uuid":"4fad2182-6de3-4407-bf8f-d8c688160ce9","awg_public_key":"` + keyB64(8) + `","internal_ip":"10.13.13.0/24","psk2":"` + keyB64(6) + `","status":"approved"}`,
+		`{"device_id":"bad>>>id","reality_uuid":"4fad2182-6de3-4407-bf8f-d8c688160cea","awg_public_key":"` + keyB64(9) + `","internal_ip":"10.13.13.13/32","psk2":"` + keyB64(6) + `","status":"approved"}`,
+	}
+	devices, err := approvedDevicesFromWorkerConfig(`{"desired_state":{"approved_devices":[` + strings.Join(append(bad, good), ",") + `]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0].DeviceID != "good" {
+		t.Fatalf("invalid devices must be skipped and valid ones kept: %+v", devices)
+	}
+	if devices[0].InternalIP != "10.13.13.10/32" {
+		t.Fatalf("internal_ip not normalized: %q", devices[0].InternalIP)
+	}
+}
+
+func TestAWGRegistrySkipsForeignAndDuplicateInternalIPs(t *testing.T) {
+	st := stateFile{AWG: awgState{SmokePublic: keyB64(1), SmokePSK: keyB64(2), SmokeIP: "10.13.13.2/32"}}
+	profile := awgInboundProfile{Name: "awg", Subnet: "10.13.13.0/24"}
+	devices := []approvedDevice{
+		{DeviceID: "a", AWGPublicKey: keyB64(5), InternalIP: "10.13.13.10/32", PSK2: keyB64(6), Status: "approved"},
+		{DeviceID: "dup", AWGPublicKey: keyB64(7), InternalIP: "10.13.13.10/32", PSK2: keyB64(6), Status: "approved"},
+		{DeviceID: "smoke-ip", AWGPublicKey: keyB64(8), InternalIP: "10.13.13.2/32", PSK2: keyB64(6), Status: "approved"},
+		{DeviceID: "outside", AWGPublicKey: keyB64(9), InternalIP: "192.168.1.5/32", PSK2: keyB64(6), Status: "approved"},
+	}
+	registry, desired := buildAWGPeerRegistryForProfile(st, devices, profile, true)
+	if len(registry.Clients) != 2 || len(desired) != 2 || desired[1].PublicKey != keyB64(5) {
+		t.Fatalf("unexpected peers: %+v", desired)
+	}
+	_, desired = buildAWGPeerRegistryForProfile(st, devices[:1], profile, false)
+	if len(desired) != 1 || desired[0].PublicKey != keyB64(5) {
+		t.Fatalf("smoke peer must be omitted when disabled: %+v", desired)
 	}
 }
 
@@ -860,8 +893,8 @@ func TestXrayConfigEnablesLoopbackUserStats(t *testing.T) {
 	}
 	api := doc["api"].(map[string]any)
 	services := api["services"].([]string)
-	if len(services) != 1 || services[0] != "StatsService" {
-		t.Fatalf("stats service missing: %#v", api)
+	if !containsString(services, "StatsService") || !containsString(services, "HandlerService") {
+		t.Fatalf("stats/handler services missing: %#v", api)
 	}
 	level := doc["policy"].(map[string]any)["levels"].(map[string]any)["0"].(map[string]any)
 	if level["statsUserUplink"] != true || level["statsUserDownlink"] != true {

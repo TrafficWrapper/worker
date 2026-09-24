@@ -1,6 +1,9 @@
 package dialect
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGenerateValidProductionDialect(t *testing.T) {
 	for i := 0; i < 100; i++ {
@@ -113,4 +116,55 @@ func contains(lines []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestValidateRejectsHeaderWhitespaceAndControl(t *testing.T) {
+	base, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{" ", "\n", "\r", "\t", "\x00", " "} {
+		for _, pos := range []string{"prefix", "suffix", "middle"} {
+			d := base
+			switch pos {
+			case "prefix":
+				d.H3 = bad + d.H3
+			case "suffix":
+				d.H3 = d.H3 + bad
+			default:
+				d.H3 = d.H3[:3] + bad + d.H3[3:]
+			}
+			if err := Validate(d, DefaultMTU); err == nil {
+				t.Fatalf("expected h3=%q to be rejected", d.H3)
+			}
+		}
+	}
+	compat := Compat()
+	compat.H1 = "1\n"
+	if err := Validate(compat, DefaultMTU); err == nil {
+		t.Fatal("expected non-canonical compat header to be rejected")
+	}
+}
+
+func TestUAPILinesNeverContainNewlines(t *testing.T) {
+	d, err := Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h1 := d.H1
+	d.H1 = h1 + "\n\nprivate_key=00"
+	d.H4 = " " + d.H4 + "\r"
+	for _, line := range UAPILines(d) {
+		if strings.ContainsAny(line, "\r\n \t") {
+			t.Fatalf("UAPI line contains whitespace: %q", line)
+		}
+	}
+	lines := UAPILines(Compat())
+	if !contains(lines, "h1=1") || !contains(lines, "h4=4") {
+		t.Fatalf("compat headers changed: %v", lines)
+	}
+	d.H1 = "00" + h1
+	if got := UAPILines(d); !contains(got, "h1="+h1) {
+		t.Fatalf("expected canonical h1=%s, got %v", h1, got)
+	}
 }

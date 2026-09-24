@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,7 +45,39 @@ func collectRealityUsageReports(cfg envConfig, devices []approvedDevice) ([]orch
 	if err != nil {
 		return nil, err
 	}
-	return buildRealityUsageReports(devices, raw)
+	deltas, err := buildRealityUsageReports(devices, raw)
+	if err != nil {
+		return nil, err
+	}
+	state := loadUsageState(realityUsageStatePath(cfg.StateDir))
+	reports := accumulateRealityUsage(deltas, state, time.Now().UTC())
+	if err := saveUsageState(realityUsageStatePath(cfg.StateDir), state); err != nil {
+		log.Printf("reality usage state save failed: %v", err)
+	}
+	return reports, nil
+}
+
+// accumulateRealityUsage adds the per-query deltas to the persisted totals and
+// reports the totals, matching the cumulative semantics of AWG usage reports.
+func accumulateRealityUsage(deltas []orchUsageReport, state usageState, now time.Time) []orchUsageReport {
+	reports := make([]orchUsageReport, 0, len(deltas))
+	for _, delta := range deltas {
+		key := realityUsageSource + ":" + delta.DeviceID
+		snap := state[key]
+		snap.RxBytes = addUint64Saturating(snap.RxBytes, delta.RxBytes)
+		snap.TxBytes = addUint64Saturating(snap.TxBytes, delta.TxBytes)
+		snap.UpdatedAt = now
+		state[key] = snap
+		delta.RxBytes = snap.RxBytes
+		delta.TxBytes = snap.TxBytes
+		reports = append(reports, delta)
+	}
+	state.prune(now)
+	return reports
+}
+
+func realityUsageStatePath(stateDir string) string {
+	return filepath.Join(stateDir, "xray", "usage.json")
 }
 
 func buildRealityUsageReports(devices []approvedDevice, raw []byte) ([]orchUsageReport, error) {
@@ -137,8 +171,10 @@ func addUint64Saturating(a, b uint64) uint64 {
 	return a + b
 }
 
+// queryXrayStatsViaDocker reads and resets the per-user counters, so every
+// call returns the traffic since the previous call and an Xray restart in
+// between cannot make the reported totals go backwards.
 func queryXrayStatsViaDocker(cfg envConfig) ([]byte, error) {
-	client := dockerUnixClient(cfg.DockerSocket, xrayStatsQueryTimeout)
 	command := []string{
 		"/usr/local/bin/xray",
 		"api",
@@ -146,8 +182,13 @@ func queryXrayStatsViaDocker(cfg envConfig) ([]byte, error) {
 		fmt.Sprintf("--server=127.0.0.1:%d", xrayAPIInPort),
 		"-pattern",
 		"user>>>",
-		"-reset=false",
+		"-reset=true",
 	}
+	return execInXrayContainer(cfg, command, xrayStatsQueryTimeout)
+}
+
+func execInXrayContainer(cfg envConfig, command []string, timeout time.Duration) ([]byte, error) {
+	client := dockerUnixClient(cfg.DockerSocket, timeout)
 	for _, candidate := range dockerContainerNameCandidates(cfg.XrayContainer) {
 		stdout, err := dockerExec(client, candidate, command)
 		if err == nil {
@@ -157,7 +198,7 @@ func queryXrayStatsViaDocker(cfg envConfig) ([]byte, error) {
 			return nil, err
 		}
 	}
-	discovered, err := discoverDockerContainerByComposeService(client, "xray")
+	discovered, err := discoverDockerContainerByComposeService(client, "xray", false)
 	if err != nil {
 		return nil, fmt.Errorf("discover xray container: %w", err)
 	}
@@ -167,11 +208,14 @@ func queryXrayStatsViaDocker(cfg envConfig) ([]byte, error) {
 	return dockerExec(client, discovered, command)
 }
 
+// dockerUnixClient disables keep-alives: every Docker call is short and rare,
+// and pooled idle connections to the socket would otherwise never be closed.
 func dockerUnixClient(socketPath string, timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
+			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "unix", socketPath)
 			},
@@ -253,7 +297,7 @@ func dockerExec(client *http.Client, container string, command []string) ([]byte
 		return nil, errors.New("docker exec still running after output closed")
 	}
 	if inspected.ExitCode != 0 {
-		return nil, fmt.Errorf("xray statsquery exit=%d: %s", inspected.ExitCode, strings.TrimSpace(string(stderr)))
+		return nil, fmt.Errorf("%s exit=%d: %s", strings.Join(command, " "), inspected.ExitCode, strings.TrimSpace(string(stderr)))
 	}
 	return stdout, nil
 }

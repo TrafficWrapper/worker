@@ -29,6 +29,10 @@ jobs:
         with:
           go-version: "1.24.x"
 
+      - name: Format
+        working-directory: ${{ matrix.module }}
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+
       - name: Build
         working-directory: ${{ matrix.module }}
         run: go build ./...
@@ -39,4 +43,15 @@ jobs:
 
       - name: Test
         working-directory: ${{ matrix.module }}
-        run: go test ./...
+        run: go test -race ./...
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Build images
+        run: |
+          cp .env.example .env
+          docker compose --profile smoke build

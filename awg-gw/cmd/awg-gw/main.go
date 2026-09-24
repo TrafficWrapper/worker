@@ -191,6 +191,10 @@ func runGateway(path string) error {
 		uapiFile.Close()
 		return err
 	}
+	if err := configureClientIsolation(cfg.Interface); err != nil {
+		uapiFile.Close()
+		return err
+	}
 
 	uapi, err := ipc.UAPIListen(cfg.Interface, uapiFile)
 	if err != nil {
@@ -274,6 +278,7 @@ func loadActivePeers(path string, now time.Time) ([]restoredPeer, error) {
 		return nil, fmt.Errorf("read peer registry %s: %w", path, err)
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
+		fmt.Fprintf(os.Stderr, "warning: peer registry %s is empty; starting without peers until the agent reconciles\n", path)
 		return nil, nil
 	}
 	var registry registryFile
@@ -287,7 +292,9 @@ func loadActivePeers(path string, now time.Time) ([]restoredPeer, error) {
 		}
 		peer, err := client.restoredPeer()
 		if err != nil {
-			return nil, fmt.Errorf("registry client %d: %w", i, err)
+			// A single malformed entry must not keep the whole gateway down.
+			fmt.Fprintf(os.Stderr, "warning: registry client %d skipped: %v\n", i, err)
+			continue
 		}
 		peers = append(peers, peer)
 	}
@@ -303,9 +310,14 @@ func (client registryClient) restoredPeer() (restoredPeer, error) {
 	if err != nil {
 		return restoredPeer{}, fmt.Errorf("psk2: %w", err)
 	}
-	if _, err := netip.ParsePrefix(client.InternalIP); err != nil {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(client.InternalIP))
+	if err != nil {
 		return restoredPeer{}, fmt.Errorf("internal_ip: %w", err)
 	}
+	if prefix.Bits() != prefix.Addr().BitLen() {
+		return restoredPeer{}, fmt.Errorf("internal_ip %s is not a single host", prefix)
+	}
+	client.InternalIP = prefix.String()
 	return restoredPeer{PublicKeyHex: publicHex, PSKHex: pskHex, AllowedIP: client.InternalIP}, nil
 }
 
@@ -364,6 +376,61 @@ func configureEgressNAT(name, address string) error {
 	}
 	fmt.Printf("nat=enabled subnet=%s exclude_if=%s\n", prefix.String(), name)
 	return nil
+}
+
+// privateDestinations are never forwarded for tunnel clients: the Docker
+// network with the agent and distributor, the host, other clients, cloud
+// metadata services and other non-public ranges.
+var privateDestinations = []string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24",
+	"192.168.0.0/16",
+	"198.18.0.0/15",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+}
+
+var privateDestinations6 = []string{
+	"::1/128",
+	"fc00::/7",
+	"fe80::/10",
+	"ff00::/8",
+}
+
+func configureClientIsolation(name string) error {
+	if strings.TrimSpace(os.Getenv("WORKER_ALLOW_PRIVATE_EGRESS")) == "1" {
+		fmt.Println("client_isolation=disabled by WORKER_ALLOW_PRIVATE_EGRESS=1")
+		return nil
+	}
+	for _, args := range clientIsolationCommands(name) {
+		cmd := exec.Command(args[0], args[1:]...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if strings.Contains(msg, "File exists") {
+				continue
+			}
+			return fmt.Errorf("%s failed: %w: %s", strings.Join(args, " "), err, msg)
+		}
+	}
+	fmt.Printf("client_isolation=enabled iface=%s\n", name)
+	return nil
+}
+
+func clientIsolationCommands(name string) [][]string {
+	table := natTableName(name) + "_isolation"
+	return [][]string{
+		{"nft", "add", "table", "inet", table},
+		{"nft", "add", "chain", "inet", table, "forward", "{", "type", "filter", "hook", "forward", "priority", "0", ";", "policy", "accept", ";", "}"},
+		{"nft", "flush", "chain", "inet", table, "forward"},
+		{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip", "daddr", "{", strings.Join(privateDestinations, ", "), "}", "drop"},
+		{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip6", "daddr", "{", strings.Join(privateDestinations6, ", "), "}", "drop"},
+	}
 }
 
 func natTableName(iface string) string {

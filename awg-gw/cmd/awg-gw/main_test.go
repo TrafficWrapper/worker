@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TrafficWrapper/worker/core/awg/dialect"
 )
@@ -186,4 +191,38 @@ func validatePeerUAPIBlocks(lines []string, wantPeers int, keepaliveLine string)
 		}
 	}
 	return nil
+}
+
+func TestClientIsolationBlocksPrivateDestinationsFromTunnel(t *testing.T) {
+	joined := []string{}
+	for _, args := range clientIsolationCommands("awg1") {
+		joined = append(joined, strings.Join(args, " "))
+	}
+	all := strings.Join(joined, "\n")
+	for _, want := range []string{"iifname awg1 ip daddr", "169.254.0.0/16", "172.16.0.0/12", "10.0.0.0/8", "fc00::/7", "hook forward", "drop"} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("isolation rules missing %q:\n%s", want, all)
+		}
+	}
+}
+
+func TestLoadActivePeersSkipsMalformedEntries(t *testing.T) {
+	good := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	registry := `{"clients":[
+		{"wg_public_key":"bad","internal_ip":"10.13.13.9/32","psk2":"` + good + `"},
+		{"wg_public_key":"` + good + `","internal_ip":"10.13.13.10","psk2":"` + good + `"},
+		{"wg_public_key":"` + good + `","internal_ip":"10.13.13.0/24","psk2":"` + good + `"},
+		{"wg_public_key":"` + good + `","internal_ip":"10.13.13.11/32","psk2":"` + good + `"}
+	]}`
+	path := filepath.Join(t.TempDir(), "peers.json")
+	if err := os.WriteFile(path, []byte(registry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	peers, err := loadActivePeers(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(peers) != 1 || peers[0].AllowedIP != "10.13.13.11/32" {
+		t.Fatalf("malformed entries must be skipped, valid kept: %+v", peers)
+	}
 }

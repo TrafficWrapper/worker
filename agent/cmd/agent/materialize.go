@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -12,9 +11,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,9 +24,7 @@ import (
 	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
-const (
-	xrayRestartDebounce = 2 * time.Second
-)
+var realityUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 type approvedDevice struct {
 	DeviceID     string                              `json:"device_id"`
@@ -126,53 +125,27 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 	if err != nil {
 		return fmt.Errorf("render xray config: %w", err)
 	}
-	if err := applyXrayConfigWithRestart(cfg, xrayRaw, len(devices), xrayRestartDebounce); err != nil {
-		return err
-	}
+	// AWG does not depend on Xray, so a Docker/Xray failure must not hold back
+	// AWG peers, and one failing AWG profile must not hold back the others.
+	var errs []error
 	for _, profile := range awgProfiles(cfg) {
 		desiredPeers, err := writeAWGPeerRegistryForProfile(cfg, st, devices, profile)
 		if err != nil {
-			return fmt.Errorf("write awg peer registry %s: %w", profile.Name, err)
+			errs = append(errs, fmt.Errorf("write awg peer registry %s: %w", profile.Name, err))
+			continue
 		}
 		if profile.UAPISocket != "" {
 			if err := syncAWGUAPI(profile.UAPISocket, desiredPeers, cfg.AWGServerKeepalive); err != nil {
-				return fmt.Errorf("sync awg uapi %s: %w", profile.Name, err)
+				errs = append(errs, fmt.Errorf("sync awg uapi %s: %w", profile.Name, err))
+				continue
 			}
 			log.Printf("awg materialized profile=%s peers=%d via %s", profile.Name, len(desiredPeers), profile.UAPISocket)
 		}
 	}
-	return nil
-}
-
-func applyXrayConfigWithRestart(cfg envConfig, xrayRaw []byte, approvedDeviceCount int, debounce time.Duration) error {
-	xrayChanged := xrayConfigChanged(cfg, xrayRaw)
-	xrayNeedsRestart := xrayChanged || xrayRestartPending(cfg)
-	if xrayNeedsRestart && cfg.XrayContainer == "" {
-		return errors.New("xray config changed but XRAY_CONTAINER_NAME is not configured")
+	if err := applyXrayConfig(cfg, xrayRaw, len(devices)); err != nil {
+		errs = append(errs, err)
 	}
-	if xrayChanged {
-		if err := markXrayRestartPending(cfg); err != nil {
-			return fmt.Errorf("mark xray restart pending: %w", err)
-		}
-		if err := writeXrayConfigBytes(cfg, xrayRaw); err != nil {
-			return fmt.Errorf("write xray config: %w", err)
-		}
-	}
-	if xrayNeedsRestart {
-		if debounce > 0 {
-			log.Printf("xray restart pending; debouncing for %s", debounce)
-			time.Sleep(debounce)
-		}
-		log.Printf("xray config changed; restarting container %s via %s", cfg.XrayContainer, cfg.DockerSocket)
-		if err := restartDockerContainer(cfg.DockerSocket, cfg.XrayContainer); err != nil {
-			return fmt.Errorf("restart xray container %s: %w", cfg.XrayContainer, err)
-		}
-		if err := clearXrayRestartPending(cfg); err != nil {
-			return fmt.Errorf("clear xray restart pending: %w", err)
-		}
-		log.Printf("xray materialized approved_devices=%d and restarted %s", approvedDeviceCount, cfg.XrayContainer)
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func approvedDevicesFromWorkerConfig(raw string) ([]approvedDevice, error) {
@@ -185,15 +158,102 @@ func approvedDevicesFromWorkerConfig(raw string) ([]approvedDevice, error) {
 		if device.Status != "approved" {
 			continue
 		}
-		if strings.TrimSpace(device.RealityUUID) == "" ||
-			strings.TrimSpace(device.AWGPublicKey) == "" ||
-			strings.TrimSpace(device.InternalIP) == "" ||
-			strings.TrimSpace(device.PSK2) == "" {
-			return nil, fmt.Errorf("approved device %q is incomplete", device.DeviceID)
+		normalized, err := normalizeApprovedDevice(device)
+		if err != nil {
+			// One malformed device must not block every other device on the
+			// worker, so it is skipped instead of failing the whole bundle.
+			log.Printf("approved device %q skipped: %v", sanitizeLogValue(device.DeviceID), err)
+			continue
 		}
-		out = append(out, device)
+		out = append(out, normalized)
 	}
 	return out, nil
+}
+
+func normalizeApprovedDevice(device approvedDevice) (approvedDevice, error) {
+	if !validDeviceID(device.DeviceID) {
+		return approvedDevice{}, errors.New("device_id contains forbidden characters")
+	}
+	device.RealityUUID = strings.TrimSpace(device.RealityUUID)
+	if !realityUUIDPattern.MatchString(device.RealityUUID) {
+		return approvedDevice{}, errors.New("reality_uuid is not a UUID")
+	}
+	base, err := normalizeAWGCreds(approvedDeviceAWGProfile{AWGPublicKey: device.AWGPublicKey, InternalIP: device.InternalIP, PSK2: device.PSK2})
+	if err != nil {
+		return approvedDevice{}, err
+	}
+	device.AWGPublicKey, device.InternalIP, device.PSK2 = base.AWGPublicKey, base.InternalIP, base.PSK2
+	if len(device.AWGProfiles) > 0 {
+		profiles := make(map[string]approvedDeviceAWGProfile, len(device.AWGProfiles))
+		for name, creds := range device.AWGProfiles {
+			normalized, err := normalizeAWGCreds(creds)
+			if err != nil {
+				log.Printf("approved device %q awg profile %q skipped: %v", sanitizeLogValue(device.DeviceID), sanitizeLogValue(name), err)
+				continue
+			}
+			profiles[name] = normalized
+		}
+		device.AWGProfiles = profiles
+	}
+	return device, nil
+}
+
+func normalizeAWGCreds(creds approvedDeviceAWGProfile) (approvedDeviceAWGProfile, error) {
+	creds.AWGPublicKey = strings.TrimSpace(creds.AWGPublicKey)
+	if _, err := base64KeyToHex(creds.AWGPublicKey); err != nil {
+		return approvedDeviceAWGProfile{}, fmt.Errorf("awg_public_key: %w", err)
+	}
+	creds.PSK2 = strings.TrimSpace(creds.PSK2)
+	if _, err := base64KeyToHex(creds.PSK2); err != nil {
+		return approvedDeviceAWGProfile{}, fmt.Errorf("psk2: %w", err)
+	}
+	ip, err := normalizeHostPrefix(creds.InternalIP)
+	if err != nil {
+		return approvedDeviceAWGProfile{}, fmt.Errorf("internal_ip: %w", err)
+	}
+	creds.InternalIP = ip
+	return creds, nil
+}
+
+// normalizeHostPrefix accepts a single host as "a.b.c.d" or "a.b.c.d/32" (or the
+// IPv6 equivalents) and returns it in canonical prefix form.
+func normalizeHostPrefix(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		if prefix.Bits() != prefix.Addr().BitLen() {
+			return "", fmt.Errorf("%q is not a single host", value)
+		}
+		return prefix.String(), nil
+	}
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return "", fmt.Errorf("%q is not an IP address", value)
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()).String(), nil
+}
+
+func validDeviceID(id string) bool {
+	if len(id) > 256 || strings.Contains(id, ">>>") {
+		return false
+	}
+	for _, r := range id {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func sanitizeLogValue(value string) string {
+	if len(value) > 64 {
+		value = value[:64]
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, value)
 }
 
 func cachedApprovedDevices(stateDir string) []approvedDevice {
@@ -238,20 +298,22 @@ func writeAWGPeerRegistry(cfg envConfig, st stateFile, devices []approvedDevice)
 }
 
 func writeAWGPeerRegistryForProfile(cfg envConfig, st stateFile, devices []approvedDevice, profile awgInboundProfile) ([]awgDesiredPeer, error) {
-	registry, desired := buildAWGPeerRegistryForProfile(st, devices, profile)
+	registry, desired := buildAWGPeerRegistryForProfile(st, devices, profile, !cfg.DisableSmokePeers)
 	if err := writeJSONFile(profile.registryPath(cfg.StateDir), registry, 0o600); err != nil {
 		return nil, err
 	}
 	return desired, nil
 }
 
-func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, profile awgInboundProfile) (awgPeerRegistry, []awgDesiredPeer) {
+func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, profile awgInboundProfile, includeSmoke bool) (awgPeerRegistry, []awgDesiredPeer) {
 	now := time.Now().UTC()
 	expires := time.Now().UTC().Add(3650 * 24 * time.Hour)
 	clients := []awgPeerRegistryClient{}
 	desired := []awgDesiredPeer{}
 	seen := map[string]struct{}{}
-	if profile.isBase() {
+	seenIPs := map[string]struct{}{}
+	subnet, subnetErr := netip.ParsePrefix(profile.Subnet)
+	if includeSmoke && profile.isBase() {
 		clients = append(clients, awgPeerRegistryClient{
 			WGPublicKey: st.AWG.SmokePublic,
 			InternalIP:  st.AWG.SmokeIP,
@@ -264,6 +326,7 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 			AllowedIP: st.AWG.SmokeIP,
 		})
 		seen[st.AWG.SmokePublic] = struct{}{}
+		seenIPs[st.AWG.SmokeIP] = struct{}{}
 	}
 	for _, device := range devices {
 		creds, ok := approvedDeviceProfileCreds(device, profile.Name)
@@ -272,6 +335,16 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 		}
 		if _, ok := seen[creds.AWGPublicKey]; ok {
 			continue
+		}
+		if _, ok := seenIPs[creds.InternalIP]; ok {
+			log.Printf("approved device %s skipped for profile %s: internal_ip %s is already assigned", sanitizeLogValue(device.DeviceID), profile.Name, creds.InternalIP)
+			continue
+		}
+		if subnetErr == nil {
+			if ip, err := netip.ParsePrefix(creds.InternalIP); err != nil || !subnet.Masked().Contains(ip.Addr()) {
+				log.Printf("approved device %s skipped for profile %s: internal_ip %s is outside %s", sanitizeLogValue(device.DeviceID), profile.Name, creds.InternalIP, profile.Subnet)
+				continue
+			}
 		}
 		deviceExpires := expires
 		if parsed, ok := approvedDeviceExpiry(device); ok {
@@ -282,6 +355,7 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 			deviceExpires = parsed
 		}
 		seen[creds.AWGPublicKey] = struct{}{}
+		seenIPs[creds.InternalIP] = struct{}{}
 		clients = append(clients, awgPeerRegistryClient{
 			WGPublicKey: creds.AWGPublicKey,
 			InternalIP:  creds.InternalIP,
@@ -361,18 +435,16 @@ func syncAWGUAPI(socketPath string, desired []awgDesiredPeer, keepaliveSec int) 
 			}
 		}
 	}
+	var addErrs []error
 	for _, peer := range desired {
 		if _, err := base64KeyToHex(peer.PublicKey); err != nil {
 			continue
 		}
 		if err := addAWGPeer(socketPath, peer, keepaliveSec); err != nil {
-			return err
+			addErrs = append(addErrs, err)
 		}
 	}
-	if desiredErr != nil {
-		return desiredErr
-	}
-	return nil
+	return errors.Join(append([]error{desiredErr}, addErrs...)...)
 }
 
 func reconcileAWGPeers(cfg envConfig, st stateFile) error {
@@ -413,7 +485,7 @@ func reconcileAWGProfile(cfg envConfig, st stateFile, devices []approvedDevice, 
 	if strings.TrimSpace(profile.UAPISocket) == "" {
 		return errors.New("UAPI socket is not configured")
 	}
-	_, desired := buildAWGPeerRegistryForProfile(st, devices, profile)
+	_, desired := buildAWGPeerRegistryForProfile(st, devices, profile, !cfg.DisableSmokePeers)
 	if len(desired) == 0 {
 		return errors.New("desired peer set is empty; refusing destructive sync")
 	}
@@ -648,15 +720,7 @@ func restartDockerContainer(socketPath, name string) error {
 	if _, err := os.Stat(socketPath); err != nil {
 		return err
 	}
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialer.DialContext(ctx, "unix", socketPath)
-			},
-		},
-	}
+	client := dockerUnixClient(socketPath, 15*time.Second)
 	names := dockerContainerNameCandidates(name)
 	for _, candidate := range names {
 		restarted, err := restartDockerContainerByName(client, candidate)
@@ -670,7 +734,7 @@ func restartDockerContainer(socketPath, name string) error {
 			return nil
 		}
 	}
-	discovered, err := discoverDockerContainerByComposeService(client, "xray")
+	discovered, err := discoverDockerContainerByComposeService(client, "xray", true)
 	if err != nil {
 		return fmt.Errorf("discover xray container: %w", err)
 	}
@@ -699,10 +763,6 @@ func dockerContainerNameCandidates(name string) []string {
 	add(name)
 	add(strings.ReplaceAll(name, "_", "-"))
 	add(strings.ReplaceAll(name, "-", "_"))
-	if strings.Contains(name, "xray") {
-		add("worker-xray-1")
-		add("worker_xray_1")
-	}
 	return out
 }
 
@@ -728,9 +788,23 @@ func restartDockerContainerByName(client *http.Client, name string) (bool, error
 	return true, nil
 }
 
-func discoverDockerContainerByComposeService(client *http.Client, service string) (string, error) {
-	filter := fmt.Sprintf(`{"label":["com.docker.compose.service=%s"]}`, service)
-	endpoint := "http://docker/containers/json?all=true&filters=" + url.QueryEscape(filter)
+// discoverDockerContainerByComposeService only looks inside the agent's own
+// compose project, so another stack's (or a stale) xray is never touched.
+func discoverDockerContainerByComposeService(client *http.Client, service string, includeStopped bool) (string, error) {
+	project, err := ownComposeProject(client)
+	if err != nil {
+		return "", err
+	}
+	filterRaw, err := json.Marshal(map[string][]string{
+		"label": {"com.docker.compose.service=" + service, "com.docker.compose.project=" + project},
+	})
+	if err != nil {
+		return "", err
+	}
+	endpoint := "http://docker/containers/json?filters=" + url.QueryEscape(string(filterRaw))
+	if includeStopped {
+		endpoint += "&all=true"
+	}
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", err
@@ -753,6 +827,9 @@ func discoverDockerContainerByComposeService(client *http.Client, service string
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&containers); err != nil {
 		return "", err
 	}
+	if len(containers) > 1 {
+		return "", fmt.Errorf("compose project %q has %d %s containers; set XRAY_CONTAINER_NAME", project, len(containers), service)
+	}
 	for _, container := range containers {
 		for _, name := range container.Names {
 			name = strings.TrimPrefix(strings.TrimSpace(name), "/")
@@ -765,4 +842,36 @@ func discoverDockerContainerByComposeService(client *http.Client, service string
 		}
 	}
 	return "", nil
+}
+
+func ownComposeProject(client *http.Client) (string, error) {
+	self, err := os.Hostname()
+	if err != nil || strings.TrimSpace(self) == "" {
+		return "", errors.New("cannot determine own container id")
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://docker/containers/"+url.PathEscape(self)+"/json", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("inspect own container %s: http %d", self, resp.StatusCode)
+	}
+	var inspected struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&inspected); err != nil {
+		return "", err
+	}
+	project := inspected.Config.Labels["com.docker.compose.project"]
+	if project == "" {
+		return "", errors.New("agent is not running in a compose project")
+	}
+	return project, nil
 }

@@ -15,6 +15,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/flynn/noise"
 
@@ -25,7 +27,15 @@ import (
 const (
 	orchestratorNoisePrologue = "TrafficWrapper orchestrator worker v1"
 	publicEnrollTimeout       = 35 * time.Second
+	maxUntrustedErrorRunes    = 200
 )
+
+var publicHTTPTransport = &http.Transport{
+	TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, // Noise pins the orchestrator static key.
+	MaxIdleConns:        4,
+	MaxIdleConnsPerHost: 2,
+	IdleConnTimeout:     30 * time.Second,
+}
 
 type publicDeviceEnrollAPIRequest struct {
 	OrchestratorURL string `json:"orchestrator_url"`
@@ -116,7 +126,10 @@ type publicApplyAPIRequest struct {
 	AWG              *publicRouteSpec `json:"awg,omitempty"`
 	AWGRUSOCKSListen string           `json:"awg_ru_socks_listen,omitempty"`
 	SOCKSListen      string           `json:"socks_listen,omitempty"`
+	SOCKSUsername    string           `json:"socks_username,omitempty"`
+	SOCKSPassword    string           `json:"socks_password,omitempty"`
 	MTU              int              `json:"mtu,omitempty"`
+	SignerPublicKey  string           `json:"signer_public_key,omitempty"`
 }
 
 type publicApplyAPIResult struct {
@@ -208,6 +221,11 @@ func publicDeviceEnroll(req publicDeviceEnrollAPIRequest) (publicDeviceEnrollAPI
 	if !wireResp.OK {
 		return publicDeviceEnrollAPIResult{}, fmt.Errorf("public device enrollment rejected: %s", wireResp.Error)
 	}
+	if strings.TrimSpace(wireResp.SignerPublicKey) != "" {
+		if err := pinRendezvousPublicKey(wireResp.SignerPublicKey, true); err != nil {
+			return publicDeviceEnrollAPIResult{}, fmt.Errorf("signer_public_key: %w", err)
+		}
+	}
 	return publicDeviceEnrollAPIResult{
 		OK:              true,
 		DeviceID:        wireResp.DeviceID,
@@ -255,7 +273,7 @@ func publicNoiseJSONRequest(ctx context.Context, baseURL, serverPublic, clientPr
 		return err
 	}
 	if !start.OK {
-		return errors.New(start.Error)
+		return untrustedServerError(start.Error)
 	}
 	msg2, err := base64.StdEncoding.DecodeString(start.Message)
 	if err != nil {
@@ -285,7 +303,7 @@ func publicNoiseJSONRequest(ctx context.Context, baseURL, serverPublic, clientPr
 		return err
 	}
 	if !envelope.OK {
-		return errors.New(envelope.Error)
+		return untrustedServerError(envelope.Error)
 	}
 	encrypted, err := base64.StdEncoding.DecodeString(envelope.Payload)
 	if err != nil {
@@ -299,12 +317,28 @@ func publicNoiseJSONRequest(ctx context.Context, baseURL, serverPublic, clientPr
 }
 
 func publicHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout: publicEnrollTimeout,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Noise pins the orchestrator static key.
-		},
+	return &http.Client{Transport: publicHTTPTransport}
+}
+
+func untrustedServerError(message string) error {
+	return fmt.Errorf("unauthenticated server response: %s", sanitizeUntrustedText(message))
+}
+
+func sanitizeUntrustedText(message string) string {
+	var b strings.Builder
+	runes := 0
+	for _, r := range strings.TrimSpace(message) {
+		if runes == maxUntrustedErrorRunes {
+			b.WriteString("...")
+			break
+		}
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			r = ' '
+		}
+		b.WriteRune(r)
+		runes++
 	}
+	return b.String()
 }
 
 func postJSON(ctx context.Context, client *http.Client, endpoint string, req any, resp any) error {
@@ -324,7 +358,7 @@ func postJSON(ctx context.Context, client *http.Client, endpoint string, req any
 	defer httpResp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 	if httpResp.StatusCode >= 300 {
-		return fmt.Errorf("%s: %s", httpResp.Status, strings.TrimSpace(string(body)))
+		return fmt.Errorf("http %d: %w", httpResp.StatusCode, untrustedServerError(string(body)))
 	}
 	if err := json.Unmarshal(body, resp); err != nil {
 		return err
@@ -370,9 +404,18 @@ func applyPublicPlatformConfig(req publicApplyAPIRequest) (publicApplyAPIResult,
 		}
 		awgRUConfigJSON = raw
 	}
+	if strings.TrimSpace(req.SignerPublicKey) != "" {
+		if err := pinRendezvousPublicKey(req.SignerPublicKey, false); err != nil {
+			return publicApplyAPIResult{}, fmt.Errorf("signer_public_key: %w", err)
+		}
+	}
 	pendingProvision.Lock()
-	pendingProvision.configJSON = defaultConfigJSON
-	pendingProvision.awgRUConfigJSON = awgRUConfigJSON
+	if defaultConfigJSON != "" {
+		pendingProvision.configJSON = defaultConfigJSON
+	}
+	if awgRUConfigJSON != "" {
+		pendingProvision.awgRUConfigJSON = awgRUConfigJSON
+	}
 	pendingProvision.Unlock()
 	return publicApplyAPIResult{
 		OK:                true,
@@ -403,6 +446,8 @@ func publicAWGConfigJSON(route *publicRouteSpec, req publicApplyAPIRequest, sock
 		PSK2:            req.PSK2,
 		AWGPreset:       presetValue,
 		SOCKSListen:     socksListen,
+		SOCKSUsername:   req.SOCKSUsername,
+		SOCKSPassword:   req.SOCKSPassword,
 		MTU:             req.MTU,
 	}
 	raw, err := json.Marshal(cfg)

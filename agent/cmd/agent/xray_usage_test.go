@@ -1,14 +1,6 @@
 package main
 
 import (
-	"encoding/binary"
-	"encoding/json"
-	"io"
-	"net"
-	"net/http"
-	"path/filepath"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -91,68 +83,17 @@ func TestCollectWorkerUsageReportsKeepsAWGWhenXrayStatsUnavailable(t *testing.T)
 	}
 }
 
-func TestQueryXrayStatsViaDockerExec(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "docker.sock")
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mu sync.Mutex
-	var command []string
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker-xray-1/exec":
-			var request struct {
-				Cmd []string `json:"Cmd"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Errorf("decode create request: %v", err)
-			}
-			mu.Lock()
-			command = append([]string(nil), request.Cmd...)
-			mu.Unlock()
-			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, `{"Id":"exec-1"}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/exec/exec-1/start":
-			w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
-			_, _ = w.Write(dockerStreamFrame(1, []byte(`{"stat":[]}`)))
-		case r.Method == http.MethodGet && r.URL.Path == "/exec/exec-1/json":
-			_, _ = io.WriteString(w, `{"Running":false,"ExitCode":0}`)
-		default:
-			http.NotFound(w, r)
-		}
-	})}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = server.Serve(ln)
-	}()
-	t.Cleanup(func() {
-		_ = server.Close()
-		<-done
-	})
-	raw, err := queryXrayStatsViaDocker(envConfig{
-		DockerSocket:  socketPath,
-		XrayContainer: "worker-xray-1",
-	})
+func TestQueryXrayStatsResetsCounters(t *testing.T) {
+	fx := &fakeXrayAPI{}
+	installFakeXrayAPI(t, fx)
+	raw, err := queryXrayStats(envConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(raw) != `{"stat":[]}` {
 		t.Fatalf("stats output=%q", raw)
 	}
-	mu.Lock()
-	joined := strings.Join(command, " ")
-	mu.Unlock()
-	if !strings.Contains(joined, "statsquery") || !strings.Contains(joined, "127.0.0.1:10085") || !strings.Contains(joined, "-reset=true") {
-		t.Fatalf("unexpected xray command: %q", joined)
+	if len(fx.calls) != 1 || fx.calls[0][0] != "statsquery" || !containsString(fx.calls[0], "-reset=true") {
+		t.Fatalf("unexpected xray api call: %v", fx.calls)
 	}
-}
-
-func dockerStreamFrame(stream byte, payload []byte) []byte {
-	frame := make([]byte, 8+len(payload))
-	frame[0] = stream
-	binary.BigEndian.PutUint32(frame[4:8], uint32(len(payload)))
-	copy(frame[8:], payload)
-	return frame
 }

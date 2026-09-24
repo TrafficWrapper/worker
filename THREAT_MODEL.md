@@ -11,7 +11,9 @@ Worker-specific risks:
   operator's hosting provider, IP address, timing, and traffic-volume patterns.
 - AWG terminates on the worker. The worker can observe decrypted egress traffic
   after tunnel termination, so do not connect devices to untrusted workers.
-- `agent` uses `docker.sock` to materialize Xray/AWG state. Treat the agent as a
+- `agent` has no Docker socket: it drives Xray over a unix API socket in a
+  volume shared only with the xray container, and AWG over UAPI. It still holds
+  all worker keys and the enrollment identity. Treat the agent as a
   privileged component and restrict host access accordingly.
 - `CAMOUFLAGE_DOMAIN` must be deployment-specific. Empty, `example.com`, and
   `example.org` values are refused by the agent and install script.

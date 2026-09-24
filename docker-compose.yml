@@ -14,19 +14,21 @@ x-defaults: &defaults
 services:
   agent:
     <<: *defaults
+    image: ghcr.io/trafficwrapper/worker-agent:${WORKER_VERSION:-local}
     build:
       context: .
       dockerfile: agent/Dockerfile
+      args:
+        VERSION: ${WORKER_VERSION:-dev}
     env_file: .env
     environment:
       WORKER_STATE_DIR: /worker-state
       AWG_UAPI_SOCKET: /var/run/wireguard/awg1.sock
-      XRAY_CONTAINER_NAME: ${XRAY_CONTAINER_NAME:-worker-xray-1}
-      DOCKER_SOCKET: /var/run/docker.sock
+      XRAY_API_SOCKET: /run/xray-api/api.sock
     volumes:
       - ./worker-state:/worker-state
       - awg-run:/var/run/wireguard
-      - /var/run/docker.sock:/var/run/docker.sock
+      - xray-api:/run/xray-api
     ports:
       - "127.0.0.1:${AGENT_PORT:-9090}:9090/tcp"
     extra_hosts:
@@ -49,9 +51,12 @@ services:
 
   awg-gw:
     <<: *defaults
+    image: ghcr.io/trafficwrapper/worker-awg-gw:${WORKER_VERSION:-local}
     build:
       context: .
       dockerfile: awg-gw/Dockerfile
+      args:
+        VERSION: ${WORKER_VERSION:-dev}
     depends_on:
       agent:
         condition: service_healthy
@@ -82,6 +87,7 @@ services:
 
   distributor:
     <<: *defaults
+    image: ghcr.io/trafficwrapper/worker-distributor:${WORKER_VERSION:-local}
     build:
       context: distributor
     depends_on:
@@ -111,6 +117,7 @@ services:
   dns:
     <<: *defaults
     profiles: ["dns"]
+    image: ghcr.io/trafficwrapper/worker-dns:${WORKER_VERSION:-local}
     build:
       context: dns
     depends_on:
@@ -136,7 +143,7 @@ services:
 
   xray:
     <<: *defaults
-    container_name: ${XRAY_CONTAINER_NAME:-worker-xray-1}
+    image: ghcr.io/trafficwrapper/worker-xray:${WORKER_VERSION:-local}
     build:
       context: xray
     depends_on:
@@ -144,8 +151,11 @@ services:
         condition: service_healthy
       distributor:
         condition: service_healthy
+    environment:
+      XRAY_API_SOCKET: /run/xray-api/api.sock
     volumes:
       - ./worker-state:/worker-state:ro
+      - xray-api:/run/xray-api
     ports:
       - "${XRAY_PORT:-2053}:8443/tcp"
     cap_drop:
@@ -165,6 +175,7 @@ services:
   awg-smoke:
     <<: *base
     profiles: ["smoke"]
+    image: ghcr.io/trafficwrapper/worker-awg-smoke:${WORKER_VERSION:-local}
     build:
       context: .
       dockerfile: awg-smoke/Dockerfile
@@ -187,3 +198,4 @@ services:
 
 volumes:
   awg-run:
+  xray-api:

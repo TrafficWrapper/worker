@@ -25,7 +25,7 @@ var (
 	quotaBlocksTotal        atomic.Uint64
 	awgPeerPolicyDriftTotal atomic.Uint64
 	uapiErrorsTotal         atomic.Uint64
-	dockerExecErrorsTotal   atomic.Uint64
+	xrayAPIErrorsTotal      atomic.Uint64
 
 	orchAppliedSeqGauge     atomic.Int64
 	orchDesiredSeqGauge     atomic.Int64
@@ -150,7 +150,7 @@ func writeAgentMetrics(m *metricsWriter, cfg envConfig) {
 	m.add("tw_worker_build_info", "gauge", "Worker agent build information.", fmt.Sprintf("{version=%q}", version), 1)
 	m.add("awg_peer_policy_drift_total", "counter", "AWG peer policy drifts repaired by reconcile.", "", awgPeerPolicyDriftTotal.Load())
 	m.add("tw_worker_uapi_errors_total", "counter", "Failed AWG UAPI operations.", "", uapiErrorsTotal.Load())
-	m.add("tw_worker_docker_exec_errors_total", "counter", "Failed docker exec calls into the Xray container.", "", dockerExecErrorsTotal.Load())
+	m.add("tw_worker_xray_api_errors_total", "counter", "Failed Xray API calls.", "", xrayAPIErrorsTotal.Load())
 	m.add("tw_worker_orch_applied_seq", "gauge", "Worker config sequence applied by this worker.", "", orchAppliedSeqGauge.Load())
 	m.add("tw_worker_orch_desired_seq", "gauge", "Latest worker config sequence announced by the orchestrator.", "", orchDesiredSeqGauge.Load())
 	m.add("tw_worker_orch_last_success_timestamp_seconds", "gauge", "Unix time of the last successful orchestrator request.", "", orchLastSuccessUnix.Load())

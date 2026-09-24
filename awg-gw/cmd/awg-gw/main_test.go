@@ -196,14 +196,21 @@ func validatePeerUAPIBlocks(lines []string, wantPeers int, keepaliveLine string)
 
 func TestClientIsolationBlocksPrivateDestinationsFromTunnel(t *testing.T) {
 	joined := []string{}
-	for _, args := range clientIsolationCommands("awg1") {
+	for _, args := range clientIsolationCommands("awg1", true, true) {
 		joined = append(joined, strings.Join(args, " "))
 	}
 	all := strings.Join(joined, "\n")
-	for _, want := range []string{"iifname awg1 ip daddr", "169.254.0.0/16", "172.16.0.0/12", "10.0.0.0/8", "fc00::/7", "hook forward", "drop"} {
+	for _, want := range []string{"iifname awg1 ip daddr", "169.254.0.0/16", "172.16.0.0/12", "10.0.0.0/8", "fc00::/7", "hook forward", "drop", "tcp dport { 25, 465, 587 } drop"} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("isolation rules missing %q:\n%s", want, all)
 		}
+	}
+	onlySMTP := ""
+	for _, args := range clientIsolationCommands("awg1", false, true) {
+		onlySMTP += strings.Join(args, " ") + "\n"
+	}
+	if strings.Contains(onlySMTP, "169.254.0.0/16") || !strings.Contains(onlySMTP, "dport") {
+		t.Fatalf("private opt-out must keep only the SMTP rule:\n%s", onlySMTP)
 	}
 }
 

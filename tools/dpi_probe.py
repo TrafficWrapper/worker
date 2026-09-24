@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Offline/live AWG wire-level stealth self-test for a public worker."""
+"""Offline/live AWG wire-level stealth self-test for a public worker.
+
+With --reality it instead compares what an active prober without a client key
+sees on the worker's REALITY port against the real camouflage site.
+"""
 
 import argparse
+import hashlib
 import json
 import os
 import signal
+import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -36,6 +43,8 @@ class Packet:
 
 def main() -> int:
     args = parse_args()
+    if args.reality:
+        return reality_main(args)
     dialect, dialect_port = load_public_dialect(args.dialect)
     awg_port = args.awg_port or dialect_port
     if not awg_port:
@@ -72,7 +81,70 @@ def parse_args():
     parser.add_argument("--duration", type=int, default=12, help="live capture duration in seconds")
     parser.add_argument("--keep-pcap", action="store_true")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--reality", metavar="HOST:PORT", help="REALITY mode: worker public REALITY endpoint to probe")
+    parser.add_argument("--sni", help="REALITY mode: camouflage domain (CAMOUFLAGE_DOMAIN)")
+    parser.add_argument("--dest", metavar="HOST:PORT", help="REALITY mode: real site to compare with; defaults to SNI:443")
+    parser.add_argument("--timeout", type=float, default=10.0, help="REALITY mode: connect timeout in seconds")
     return parser.parse_args()
+
+
+def split_host_port(value: str, default_port: int) -> tuple[str, int]:
+    if value.startswith("["):
+        host, _, rest = value[1:].partition("]")
+        port = rest.lstrip(":")
+    else:
+        host, sep, port = value.rpartition(":")
+        if not sep:
+            host, port = value, ""
+    return host, int(port) if port else default_port
+
+
+def tls_observation(address: str, sni: str, timeout: float) -> dict:
+    host, port = split_host_port(address, 443)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.set_alpn_protocols(["h2", "http/1.1"])
+    started = time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=sni) as tls:
+                der = tls.getpeercert(binary_form=True) or b""
+                return {
+                    "address": address,
+                    "ok": True,
+                    "version": tls.version(),
+                    "alpn": tls.selected_alpn_protocol(),
+                    "cipher": tls.cipher()[0],
+                    "cert_sha256": hashlib.sha256(der).hexdigest(),
+                    "rtt_ms": round((time.monotonic() - started) * 1000),
+                }
+    except (OSError, ssl.SSLError) as exc:
+        return {"address": address, "ok": False, "error": str(exc)}
+
+
+def reality_main(args) -> int:
+    if not args.sni:
+        raise SystemExit("--sni is required with --reality")
+    dest = args.dest or f"{args.sni}:443"
+    worker = tls_observation(args.reality, args.sni, args.timeout)
+    real = tls_observation(dest, args.sni, args.timeout)
+    checks = {}
+    if worker["ok"] and real["ok"]:
+        for key in ("version", "alpn", "cipher", "cert_sha256"):
+            checks[key] = worker[key] == real[key]
+    indistinguishable = bool(checks) and all(checks.values())
+    report = {"mode": "reality", "worker": worker, "dest": real, "matches": checks, "indistinguishable": indistinguishable}
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"worker {worker}")
+        print(f"dest   {real}")
+        for key, same in checks.items():
+            print(f"  {key}: {'same' if same else 'DIFFERENT'}")
+        print("verdict: " + ("indistinguishable from the camouflage site" if indistinguishable else "DISTINGUISHABLE - fix REALITY_DEST/CAMOUFLAGE_DOMAIN"))
+    return 0 if indistinguishable else 2
 
 
 def capture(interface: str, awg_port: int, duration: int, pcap_path: str):

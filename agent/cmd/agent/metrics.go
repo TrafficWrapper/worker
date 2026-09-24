@@ -167,6 +167,21 @@ func writeAgentMetrics(m *metricsWriter, cfg envConfig) {
 		m.add("tw_worker_distributor_cert_expiry_seconds", "gauge", "Seconds until the distributor certificate expires.", "", int64(time.Until(expiry).Seconds()))
 	}
 	m.add("tw_worker_quota_blocks_total", "counter", "Quota blocks reported by the orchestrator.", "", quotaBlocksTotal.Load())
+	health := healthSnapshot()
+	for _, probe := range []struct {
+		name   string
+		report *probeReport
+	}{{"camouflage", health.Camouflage}, {"reality", health.Reality}} {
+		name, report := probe.name, probe.report
+		if report == nil {
+			continue
+		}
+		ok := 0
+		if report.OK {
+			ok = 1
+		}
+		m.add("tw_worker_probe_ok", "gauge", "Result of the last camouflage/REALITY probe (1 = healthy).", fmt.Sprintf("{probe=%q}", name), ok)
+	}
 }
 
 func sortedKeys(values map[string]uint64) []string {

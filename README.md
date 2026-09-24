@@ -52,6 +52,9 @@ the worker host with `tcpdump` installed:
 ```sh
 sudo python3 tools/dpi_probe.py --interface <iface> --dialect /worker-state/awg/awg-gw.json --json
 python3 tools/dpi_probe.py --pcap capture.pcap --dialect /worker-state/awg/awg-gw.json --awg-port <udp-port>
+# REALITY: compare what a prober without a client key sees with the real site
+# (run from outside the worker, ideally from the censored network).
+python3 tools/dpi_probe.py --reality <worker-ip>:<xray-port> --sni <CAMOUFLAGE_DOMAIN>
 ```
 
 The probe reads the public worker dialect envelope (`listen_port` + `dialect`)
@@ -89,6 +92,13 @@ Example alert rules:
 groups:
   - name: trafficwrapper-worker
     rules:
+      - alert: TWWorkerCamouflageProbeFailed
+        expr: tw_worker_probe_ok == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.probe }} probe failed; see self-describe health and agent logs"
       - alert: TWWorkerAWGInterfaceDown
         expr: tw_worker_awg_interface_up == 0
         for: 2m
@@ -221,6 +231,9 @@ binaries:
 | `PUBLIC_ADDRESS` | Public DNS name or IP advertised to clients. | Optional | detected egress IP | `worker1.example.com` or a public IPv4. |
 | `EGRESS_IP` | Explicit public egress IP advertised to clients and sent in worker ack. Overrides persisted bootstrap state. | Optional | public echo-IP probe, then local route fallback | Set if auto-detection is wrong. |
 | `CAPACITY` | Capacity hint reported to the orchestrator. | Optional | `32` | Any positive integer; invalid values stop the agent. |
+| `WORKER_BLOCK_SMTP` | Blocks outbound mail ports 25/465/587 for clients (Xray and AWG). | Optional | `1` | Keep `1`: spam from a worker IP gets the host blacklisted. |
+| `WORKER_BLOCK_BITTORRENT` | Blocks BitTorrent for REALITY clients (enables Xray sniffing with `routeOnly`). | Optional | `1` | Keep `1` to avoid DMCA notices to the hosting provider. |
+| `REALITY_PROBE_ADDR` | Address the agent uses to probe its own REALITY listener like a censor without a client key. | Optional | `xray:8443` | Keep the Compose default. |
 | `WORKER_ALLOW_PRIVATE_EGRESS` | Lets VPN clients reach private, loopback, link-local (cloud metadata) and Docker-internal addresses through the worker. | Optional | `0` | Keep `0`: both Xray routing and the `awg-gw` forward filter block those ranges. |
 | `WORKER_SMOKE_PEERS` | Built-in smoke credentials (`p0-smoke` REALITY user and AWG smoke peer). | Optional | enabled standalone, disabled with `ORCH_URL` | `1` to keep them on an orchestrated worker for `awg-smoke`, `0` to disable. |
 | `XRAY_PORT` | Public TCP port mapped to the REALITY container. | Optional | `2053` | `8444`, `2053`, or another free TCP port. |

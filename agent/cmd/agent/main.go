@@ -106,6 +106,9 @@ type envConfig struct {
 	DisableSmokePeers      bool
 	AllowPrivateEgress     bool
 	OrchAckInterval        time.Duration
+	RealityProbeAddr       string
+	BlockSMTP              bool
+	BlockBitTorrent        bool
 }
 
 type awgInboundProfile struct {
@@ -227,6 +230,7 @@ func run(cfg envConfig) error {
 		_ = srv.Shutdown(shutdown)
 	}()
 	go runDistributorCertRenewal(ctx, cfg)
+	go runHealthProbes(ctx, cfg)
 	if cfg.OrchURL != "" {
 		go runOrchestratorLoop(ctx, cfg, st, orch)
 	}
@@ -397,6 +401,9 @@ func readEnv() (envConfig, error) {
 		return envConfig{}, errors.New("WORKER_SMOKE_PEERS must be 0 or 1")
 	}
 	cfg.AllowPrivateEgress = getenv("WORKER_ALLOW_PRIVATE_EGRESS", "0") == "1"
+	cfg.RealityProbeAddr = getenv("REALITY_PROBE_ADDR", defaultRealityAddr)
+	cfg.BlockSMTP = getenv("WORKER_BLOCK_SMTP", "1") == "1"
+	cfg.BlockBitTorrent = getenv("WORKER_BLOCK_BITTORRENT", "1") == "1"
 	ackInterval, err := time.ParseDuration(getenv("ORCH_ACK_INTERVAL", "90s"))
 	if err != nil || ackInterval < 10*time.Second || ackInterval > time.Hour {
 		return envConfig{}, errors.New("ORCH_ACK_INTERVAL must be a duration between 10s and 1h")
@@ -904,6 +911,15 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		},
 		"streamSettings": streamSettings,
 	}
+	if cfg.BlockBitTorrent {
+		// Protocol-based routing needs sniffing; routeOnly keeps the client's
+		// requested destination untouched.
+		realityInbound["sniffing"] = map[string]any{
+			"enabled":      true,
+			"destOverride": []string{"http", "tls", "quic"},
+			"routeOnly":    true,
+		}
+	}
 	apiInbound := map[string]any{
 		"tag":      "api",
 		"listen":   "127.0.0.1",
@@ -964,6 +980,22 @@ func xrayRouting(cfg envConfig) map[string]any {
 		"inboundTag":  []string{"api"},
 		"outboundTag": "api",
 	}}
+	// Abuse from a worker IP (spam, torrent DMCA notices) gets the host
+	// suspended, so these are blocked by default.
+	if cfg.BlockBitTorrent {
+		rules = append(rules, map[string]any{
+			"type":        "field",
+			"protocol":    []string{"bittorrent"},
+			"outboundTag": "block",
+		})
+	}
+	if cfg.BlockSMTP {
+		rules = append(rules, map[string]any{
+			"type":        "field",
+			"port":        "25,465,587",
+			"outboundTag": "block",
+		})
+	}
 	if cfg.AllowPrivateEgress {
 		return map[string]any{"rules": rules}
 	}
@@ -1212,6 +1244,7 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 		"reality":         reality,
 		"awg":             baseAWG,
 		"awg_profiles":    awgProfilePayloads,
+		"health":          healthSnapshot(),
 		"orchestrator": map[string]any{
 			"noise_xk_ready":  true,
 			"pull_ready":      true,

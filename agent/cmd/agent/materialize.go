@@ -29,6 +29,7 @@ var realityUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9
 type approvedDevice struct {
 	DeviceID     string                              `json:"device_id"`
 	RealityUUID  string                              `json:"reality_uuid"`
+	RealityFlow  string                              `json:"reality_flow,omitempty"`
 	AWGPublicKey string                              `json:"awg_public_key"`
 	InternalIP   string                              `json:"internal_ip"`
 	PSK2         string                              `json:"psk2"`
@@ -178,6 +179,10 @@ func normalizeApprovedDevice(device approvedDevice) (approvedDevice, error) {
 	device.RealityUUID = strings.TrimSpace(device.RealityUUID)
 	if !realityUUIDPattern.MatchString(device.RealityUUID) {
 		return approvedDevice{}, errors.New("reality_uuid is not a UUID")
+	}
+	device.RealityFlow = strings.TrimSpace(device.RealityFlow)
+	if err := validRealityFlow(device.RealityFlow); err != nil {
+		return approvedDevice{}, err
 	}
 	base, err := normalizeAWGCreds(approvedDeviceAWGProfile{AWGPublicKey: device.AWGPublicKey, InternalIP: device.InternalIP, PSK2: device.PSK2})
 	if err != nil {

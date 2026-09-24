@@ -231,6 +231,8 @@ binaries:
 | `PUBLIC_ADDRESS` | Public DNS name or IP advertised to clients. | Optional | detected egress IP | `worker1.example.com` or a public IPv4. |
 | `EGRESS_IP` | Explicit public egress IP advertised to clients and sent in worker ack. Overrides persisted bootstrap state. | Optional | public echo-IP probe, then local route fallback | Set if auto-detection is wrong. |
 | `CAPACITY` | Capacity hint reported to the orchestrator. | Optional | `32` | Any positive integer; invalid values stop the agent. |
+| `REALITY_INBOUNDS` | Extra REALITY inbounds as JSON (`name`, `network` tcp/xhttp, `listen_port`, `public_port`, `xhttp_path`, `xhttp_mode`, `xhttp_host`). Clients get them as `reality_profiles` in self-describe for fallback. | Optional | empty | Publish each `listen_port` with a `docker-compose.override.yml` that adds `ports: ["<public_port>:<listen_port>/tcp"]` to `xray`. |
+| `WORKER_DIALECT_WIDE` | Generate new AWG dialects with wide junk-packet ranges instead of the legacy Jmin=8 fingerprint. | Optional | `0` | Set `1` only after all clients accept Jc 3..16, Jmin 8..64. See ARCHITECTURE for dialect rotation. |
 | `WORKER_BLOCK_SMTP` | Blocks outbound mail ports 25/465/587 for clients (Xray and AWG). | Optional | `1` | Keep `1`: spam from a worker IP gets the host blacklisted. |
 | `WORKER_BLOCK_BITTORRENT` | Blocks BitTorrent for REALITY clients (enables Xray sniffing with `routeOnly`). | Optional | `1` | Keep `1` to avoid DMCA notices to the hosting provider. |
 | `REALITY_PROBE_ADDR` | Address the agent uses to probe its own REALITY listener like a censor without a client key. | Optional | `xray:8443` | Keep the Compose default. |

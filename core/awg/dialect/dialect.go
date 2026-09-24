@@ -45,6 +45,16 @@ type Dialect struct {
 	H4   string `json:"h4"`
 }
 
+// Production junk-packet bounds. The legacy generator stays inside the
+// narrower Jc 4..12, Jmin 8, Jmax 40..80 so older clients keep accepting it.
+const (
+	minJc         = 3
+	maxJc         = 16
+	minJmin       = 8
+	maxJmin       = 64
+	maxJunkSpread = 200
+)
+
 type HeaderRange struct {
 	Start uint32
 	End   uint32
@@ -52,6 +62,31 @@ type HeaderRange struct {
 
 func Generate() (Dialect, error) {
 	return GenerateWithReader(rand.Reader)
+}
+
+// GenerateWide draws junk-packet parameters from the full production ranges
+// accepted by ValidateProduction instead of the narrow legacy ones, so
+// deployments do not share a common Jmin/Jmax fingerprint. Only use it once
+// every client accepts the wider ranges.
+func GenerateWide() (Dialect, error) {
+	d, err := GenerateWithReader(rand.Reader)
+	if err != nil {
+		return Dialect{}, err
+	}
+	r := rand.Reader
+	if d.Jc, err = randInt(r, minJc, maxJc); err != nil {
+		return Dialect{}, err
+	}
+	if d.Jmin, err = randInt(r, minJmin, maxJmin); err != nil {
+		return Dialect{}, err
+	}
+	if d.Jmax, err = randInt(r, d.Jmin+32, d.Jmin+maxJunkSpread); err != nil {
+		return Dialect{}, err
+	}
+	if err := Validate(d, DefaultMTU); err != nil {
+		return Dialect{}, err
+	}
+	return d, nil
 }
 
 func GenerateWithReader(r io.Reader) (Dialect, error) {
@@ -155,14 +190,14 @@ func ValidateProduction(d Dialect, mtu int) error {
 	if mtu <= 0 {
 		return errors.New("mtu must be positive")
 	}
-	if d.Jc < 4 || d.Jc > 12 {
-		return fmt.Errorf("jc must be in [4,12], got %d", d.Jc)
+	if d.Jc < minJc || d.Jc > maxJc {
+		return fmt.Errorf("jc must be in [%d,%d], got %d", minJc, maxJc, d.Jc)
 	}
-	if d.Jmin != 8 {
-		return fmt.Errorf("jmin must be 8, got %d", d.Jmin)
+	if d.Jmin < minJmin || d.Jmin > maxJmin {
+		return fmt.Errorf("jmin must be in [%d,%d], got %d", minJmin, maxJmin, d.Jmin)
 	}
-	if d.Jmax < 40 || d.Jmax > 80 || d.Jmax >= mtu {
-		return fmt.Errorf("jmax must be in [40,80] and < mtu(%d), got %d", mtu, d.Jmax)
+	if d.Jmax < 40 || d.Jmax > maxJmin+maxJunkSpread || d.Jmax >= mtu {
+		return fmt.Errorf("jmax must be in [40,%d] and < mtu(%d), got %d", maxJmin+maxJunkSpread, mtu, d.Jmax)
 	}
 	if d.Jmin >= d.Jmax {
 		return fmt.Errorf("jmin must be < jmax, got jmin=%d jmax=%d", d.Jmin, d.Jmax)

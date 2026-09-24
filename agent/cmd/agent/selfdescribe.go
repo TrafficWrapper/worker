@@ -32,7 +32,7 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 	if xhttp := xhttpSettings(cfg); xhttp != nil {
 		reality["xhttp"] = xhttp
 	}
-	cohorts := activeCohortShortIDs(st, revokedShortIDs(cfg.StateDir))
+	cohorts := publishedCohortShortIDs(st)
 	reality["cohort_short_ids"] = cohorts
 	realityProfilePayloads := []any{}
 	for _, profile := range realityProfiles(cfg) {

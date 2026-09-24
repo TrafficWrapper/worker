@@ -158,13 +158,14 @@ func realityShortIDs(st stateFile, revoked []string) []string {
 	return ids
 }
 
-func activeCohortShortIDs(st stateFile, revoked []string) []string {
-	active := realityShortIDs(st, revoked)
-	out := []string{}
-	for _, id := range active {
-		if id != strings.ToLower(st.Reality.ShortID) {
-			out = append(out, id)
-		}
+// publishedCohortShortIDs returns every cohort short ID in generation order,
+// revoked ones included. Clients pick their slot by index into this list, so
+// its length and order must never change; revocation only removes an ID from
+// what Xray accepts.
+func publishedCohortShortIDs(st stateFile) []string {
+	out := make([]string, 0, len(st.Reality.CohortShortIDs))
+	for _, id := range st.Reality.CohortShortIDs {
+		out = append(out, strings.ToLower(id))
 	}
 	return out
 }

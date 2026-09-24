@@ -74,8 +74,14 @@ func TestRealityCohortsAndRevocation(t *testing.T) {
 	if len(ids) != realityCohortCount || ids[0] != "abcd" || containsString(ids, revoked) {
 		t.Fatalf("short ids=%v", ids)
 	}
-	if containsString(activeCohortShortIDs(st, revokedShortIDs(stateDir)), "abcd") {
-		t.Fatal("base short id listed as a cohort")
+	published := publishedCohortShortIDs(st)
+	if len(published) != realityCohortCount || published[3] != revoked || containsString(published, "abcd") {
+		t.Fatalf("published cohorts must keep every slot in generation order: %v", published)
+	}
+	for i, id := range st.Reality.CohortShortIDs {
+		if published[i] != id {
+			t.Fatalf("slot %d moved: %v", i, published)
+		}
 	}
 }
 

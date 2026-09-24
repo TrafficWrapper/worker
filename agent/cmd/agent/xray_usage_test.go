@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 func TestBuildRealityUsageReportsMapsPerUserStats(t *testing.T) {
@@ -56,7 +58,7 @@ func TestAccumulateRealityUsageSurvivesCounterResets(t *testing.T) {
 
 func TestCollectWorkerUsageReportsKeepsAWGWhenXrayStatsUnavailable(t *testing.T) {
 	pub := keyB64(9)
-	pubHex, err := base64KeyToHex(pub)
+	pubHex, err := serverpeer.KeyB64ToHex(pub)
 	if err != nil {
 		t.Fatal(err)
 	}

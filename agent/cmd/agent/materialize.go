@@ -2,13 +2,12 @@ package main
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -56,18 +55,10 @@ type workerConfigDocument struct {
 	} `json:"desired_state"`
 }
 
-type awgPeerRegistry struct {
-	Clients []awgPeerRegistryClient `json:"clients"`
-}
-
-type awgPeerRegistryClient struct {
-	WGPublicKey  string    `json:"wg_public_key"`
-	InternalIP   string    `json:"internal_ip"`
-	PSK2         string    `json:"psk2"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	DownloadMbps int       `json:"download_mbps,omitempty"`
-	UploadMbps   int       `json:"upload_mbps,omitempty"`
-}
+type (
+	awgPeerRegistry       = serverpeer.Registry
+	awgPeerRegistryClient = serverpeer.RegistryClient
+)
 
 type awgDesiredPeer struct {
 	PublicKey string
@@ -146,7 +137,7 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 				errs = append(errs, fmt.Errorf("sync awg uapi %s: %w", profile.Name, err))
 				continue
 			}
-			log.Printf("awg materialized profile=%s peers=%d via %s", profile.Name, len(desiredPeers), profile.UAPISocket)
+			slog.Info("awg materialized", "profile", profile.Name, "peers", len(desiredPeers), "uapi_socket", profile.UAPISocket)
 		}
 	}
 	if err := applyXrayConfig(cfg, xrayRaw, len(devices)); err != nil {
@@ -169,7 +160,7 @@ func approvedDevicesFromWorkerConfig(raw string) ([]approvedDevice, error) {
 		if err != nil {
 			// One malformed device must not block every other device on the
 			// worker, so it is skipped instead of failing the whole bundle.
-			log.Printf("approved device %q skipped: %v", sanitizeLogValue(device.DeviceID), err)
+			slog.Warn("approved device skipped", "device_id", sanitizeLogValue(device.DeviceID), "err", err)
 			continue
 		}
 		out = append(out, normalized)
@@ -202,7 +193,7 @@ func normalizeApprovedDevice(device approvedDevice) (approvedDevice, error) {
 		for name, creds := range device.AWGProfiles {
 			normalized, err := normalizeAWGCreds(creds)
 			if err != nil {
-				log.Printf("approved device %q awg profile %q skipped: %v", sanitizeLogValue(device.DeviceID), sanitizeLogValue(name), err)
+				slog.Warn("approved device awg profile skipped", "device_id", sanitizeLogValue(device.DeviceID), "profile", sanitizeLogValue(name), "err", err)
 				continue
 			}
 			profiles[name] = normalized
@@ -214,11 +205,11 @@ func normalizeApprovedDevice(device approvedDevice) (approvedDevice, error) {
 
 func normalizeAWGCreds(creds approvedDeviceAWGProfile) (approvedDeviceAWGProfile, error) {
 	creds.AWGPublicKey = strings.TrimSpace(creds.AWGPublicKey)
-	if _, err := base64KeyToHex(creds.AWGPublicKey); err != nil {
+	if _, err := serverpeer.KeyB64ToHex(creds.AWGPublicKey); err != nil {
 		return approvedDeviceAWGProfile{}, fmt.Errorf("awg_public_key: %w", err)
 	}
 	creds.PSK2 = strings.TrimSpace(creds.PSK2)
-	if _, err := base64KeyToHex(creds.PSK2); err != nil {
+	if _, err := serverpeer.KeyB64ToHex(creds.PSK2); err != nil {
 		return approvedDeviceAWGProfile{}, fmt.Errorf("psk2: %w", err)
 	}
 	ip, err := normalizeHostPrefix(creds.InternalIP)
@@ -273,7 +264,7 @@ func sanitizeLogValue(value string) string {
 func cachedApprovedDevices(stateDir string) []approvedDevice {
 	devices, err := loadCachedApprovedDevices(stateDir)
 	if err != nil {
-		log.Printf("cached approved_devices ignored: %v", err)
+		slog.Warn("cached approved_devices ignored", "err", err)
 		return nil
 	}
 	return devices
@@ -299,7 +290,7 @@ func filterUnexpiredApprovedDevices(devices []approvedDevice, now time.Time) []a
 	out := make([]approvedDevice, 0, len(devices))
 	for _, device := range devices {
 		if expiresAt, ok := approvedDeviceExpiry(device); ok && !now.Before(expiresAt) {
-			logDebugf("approved device %s expired at %s; skipping materialization", device.DeviceID, expiresAt.Format(time.RFC3339))
+			slog.Debug("approved device expired; skipping materialization", "device_id", device.DeviceID, "expires_at", expiresAt.Format(time.RFC3339))
 			continue
 		}
 		out = append(out, device)
@@ -351,19 +342,19 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 			continue
 		}
 		if _, ok := seenIPs[creds.InternalIP]; ok {
-			log.Printf("approved device %s skipped for profile %s: internal_ip %s is already assigned", sanitizeLogValue(device.DeviceID), profile.Name, creds.InternalIP)
+			slog.Warn("approved device skipped: internal_ip is already assigned", "device_id", sanitizeLogValue(device.DeviceID), "profile", profile.Name, "internal_ip", creds.InternalIP)
 			continue
 		}
 		if subnetErr == nil {
 			if ip, err := netip.ParsePrefix(creds.InternalIP); err != nil || !subnet.Masked().Contains(ip.Addr()) {
-				log.Printf("approved device %s skipped for profile %s: internal_ip %s is outside %s", sanitizeLogValue(device.DeviceID), profile.Name, creds.InternalIP, profile.Subnet)
+				slog.Warn("approved device skipped: internal_ip is outside the profile subnet", "device_id", sanitizeLogValue(device.DeviceID), "profile", profile.Name, "internal_ip", creds.InternalIP, "subnet", profile.Subnet)
 				continue
 			}
 		}
 		deviceExpires := expires
 		if parsed, ok := approvedDeviceExpiry(device); ok {
 			if !now.Before(parsed) {
-				logDebugf("approved device %s expired at %s; skipping AWG peer", device.DeviceID, parsed.Format(time.RFC3339))
+				slog.Debug("approved device expired; skipping AWG peer", "device_id", device.DeviceID, "expires_at", parsed.Format(time.RFC3339))
 				continue
 			}
 			deviceExpires = parsed
@@ -418,7 +409,7 @@ func approvedDeviceExpiry(device approvedDevice) (time.Time, bool) {
 	}
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
-		log.Printf("approved device %s has invalid expires_at %q: %v", device.DeviceID, value, err)
+		slog.Warn("approved device has invalid expires_at", "device_id", device.DeviceID, "expires_at", value, "err", err)
 		return time.Time{}, false
 	}
 	return parsed.UTC(), true
@@ -441,7 +432,7 @@ func syncAWGUAPI(socketPath string, desired []awgDesiredPeer, keepaliveSec int) 
 	var desiredErr error
 	var changed []awgDesiredPeer
 	for _, peer := range desired {
-		hexKey, err := base64KeyToHex(peer.PublicKey)
+		hexKey, err := serverpeer.KeyB64ToHex(peer.PublicKey)
 		if err != nil {
 			if desiredErr == nil {
 				desiredErr = fmt.Errorf("desired peer public key: %w", err)
@@ -499,11 +490,11 @@ func awgBatchLines(changed []awgDesiredPeer, stale []string, keepaliveSec int) (
 		lines = append(lines, "public_key="+normalized, "remove=true")
 	}
 	for _, peer := range changed {
-		pubHex, err := base64KeyToHex(peer.PublicKey)
+		pubHex, err := serverpeer.KeyB64ToHex(peer.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("wg public key: %w", err)
 		}
-		pskHex, err := base64KeyToHex(peer.PSK2)
+		pskHex, err := serverpeer.KeyB64ToHex(peer.PSK2)
 		if err != nil {
 			return nil, fmt.Errorf("psk2: %w", err)
 		}
@@ -522,7 +513,7 @@ func awgPeerMatches(live awgPeerConfig, want awgDesiredPeer, keepaliveSec int) b
 		return false
 	}
 	if live.PresharedKeyHex != "" {
-		pskHex, err := base64KeyToHex(want.PSK2)
+		pskHex, err := serverpeer.KeyB64ToHex(want.PSK2)
 		if err != nil || pskHex != live.PresharedKeyHex {
 			return false
 		}
@@ -558,7 +549,7 @@ func reconcileAWGPeers(cfg envConfig, st stateFile) error {
 		if result.err == nil {
 			continue
 		}
-		log.Printf("awg reconcile profile=%s skipped: %v", result.name, result.err)
+		slog.Warn("awg reconcile skipped", "profile", result.name, "err", result.err)
 		errs = append(errs, fmt.Errorf("profile %s: %w", result.name, result.err))
 	}
 	return errors.Join(errs...)
@@ -584,25 +575,24 @@ func reconcileAWGProfile(cfg envConfig, st stateFile, devices []approvedDevice, 
 		return nil
 	}
 	awgPeerPolicyDriftTotal.Add(1)
-	log.Printf(
-		"awg peer policy drift profile=%s reason=%s current=%d desired=%d server_keepalive=%d",
-		profile.Name,
-		reason,
-		len(current),
-		len(desired),
-		cfg.AWGServerKeepalive,
+	slog.Info("awg peer policy drift",
+		"profile", profile.Name,
+		"reason", reason,
+		"current", len(current),
+		"desired", len(desired),
+		"server_keepalive", cfg.AWGServerKeepalive,
 	)
 	if err := syncAWGUAPI(profile.UAPISocket, desired, cfg.AWGServerKeepalive); err != nil {
 		return fmt.Errorf("repair drift: %w", err)
 	}
-	log.Printf("awg peer policy reconciled profile=%s peers=%d", profile.Name, len(desired))
+	slog.Info("awg peer policy reconciled", "profile", profile.Name, "peers", len(desired))
 	return nil
 }
 
 func awgPeersNeedSync(current []awgPeerConfig, desired []awgDesiredPeer, keepaliveSec int) (bool, string, error) {
 	desiredByHex := make(map[string]awgDesiredPeer, len(desired))
 	for _, peer := range desired {
-		hexKey, err := base64KeyToHex(peer.PublicKey)
+		hexKey, err := serverpeer.KeyB64ToHex(peer.PublicKey)
 		if err != nil {
 			return false, "", fmt.Errorf("desired peer public key: %w", err)
 		}
@@ -637,11 +627,11 @@ func awgPeersNeedSync(current []awgPeerConfig, desired []awgDesiredPeer, keepali
 }
 
 func addAWGPeer(socketPath string, peer awgDesiredPeer, keepaliveSec int) error {
-	pubHex, err := base64KeyToHex(peer.PublicKey)
+	pubHex, err := serverpeer.KeyB64ToHex(peer.PublicKey)
 	if err != nil {
 		return fmt.Errorf("wg public key: %w", err)
 	}
-	pskHex, err := base64KeyToHex(peer.PSK2)
+	pskHex, err := serverpeer.KeyB64ToHex(peer.PSK2)
 	if err != nil {
 		return fmt.Errorf("psk2: %w", err)
 	}
@@ -775,17 +765,6 @@ func writeUAPI(socketPath string, lines []string) error {
 			return fmt.Errorf("UAPI returned %s", line)
 		}
 	}
-}
-
-func base64KeyToHex(value string) (string, error) {
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
-	if err != nil {
-		return "", err
-	}
-	if len(raw) != 32 {
-		return "", fmt.Errorf("expected 32 bytes, got %d", len(raw))
-	}
-	return hex.EncodeToString(raw), nil
 }
 
 func normalizeHexKey(value string) (string, error) {

@@ -3,11 +3,13 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 func TestBuildAWGUsageReportsAccumulatesAndHandlesCounterReset(t *testing.T) {
 	pub := keyB64(9)
-	pubHex, err := base64KeyToHex(pub)
+	pubHex, err := serverpeer.KeyB64ToHex(pub)
 	if err != nil {
 		t.Fatal(err)
 	}

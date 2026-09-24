@@ -6,7 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -81,10 +81,10 @@ func runHealthProbesOnce(ctx context.Context, cfg envConfig) {
 	reality := probeRealityFallback(ctx, cfg.RealityProbeAddr, cfg.CamouflageDomain)
 	currentHealth.Store(&healthState{Camouflage: &camouflage, Reality: &reality})
 	if !camouflage.OK {
-		log.Printf("warning: REALITY_DEST %s is not a good camouflage target for %s: %s", camouflage.Target, cfg.CamouflageDomain, probeProblem(camouflage))
+		slog.Warn("REALITY_DEST is not a good camouflage target", "target", camouflage.Target, "camouflage_domain", cfg.CamouflageDomain, "problem", probeProblem(camouflage))
 	}
 	if !reality.OK {
-		log.Printf("warning: REALITY listener %s does not look like %s to a probe without a client key: %s", reality.Target, cfg.CamouflageDomain, probeProblem(reality))
+		slog.Warn("REALITY listener does not look like the camouflage site to a probe without a client key", "target", reality.Target, "camouflage_domain", cfg.CamouflageDomain, "problem", probeProblem(reality))
 	}
 }
 

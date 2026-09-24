@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,7 @@ type fakeTelemetryClient struct {
 	err error
 }
 
-func (c fakeTelemetryClient) telemetry(string, []byte, map[string]string) error {
+func (c fakeTelemetryClient) telemetry(context.Context, string, []byte, map[string]string) error {
 	return c.err
 }
 

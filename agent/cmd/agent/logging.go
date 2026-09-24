@@ -1,42 +1,27 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"strings"
-	"sync/atomic"
 )
 
-const (
-	logLevelDebug int32 = iota
-	logLevelInfo
-	logLevelWarn
-	logLevelError
-)
-
-var currentLogLevel atomic.Int32
+var logLevel slog.LevelVar
 
 func init() {
-	currentLogLevel.Store(parseLogLevel(os.Getenv("LOG_LEVEL")))
+	logLevel.Set(parseLogLevel(os.Getenv("LOG_LEVEL")))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: &logLevel})))
 }
 
-func parseLogLevel(value string) int32 {
+func parseLogLevel(value string) slog.Level {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "debug":
-		return logLevelDebug
+		return slog.LevelDebug
 	case "warn", "warning":
-		return logLevelWarn
+		return slog.LevelWarn
 	case "error":
-		return logLevelError
+		return slog.LevelError
 	default:
-		return logLevelInfo
-	}
-}
-
-// logDebugf is for messages that repeat on every loop iteration; they are
-// hidden unless LOG_LEVEL=debug.
-func logDebugf(format string, args ...any) {
-	if currentLogLevel.Load() <= logLevelDebug {
-		log.Printf(format, args...)
+		return slog.LevelInfo
 	}
 }

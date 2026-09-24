@@ -373,7 +373,7 @@ func (c *orchClient) pull(workerID string, have int64) (orchPullResponse, error)
 
 func (c *orchClient) ack(workerID string, seq int64, egressIP string, self map[string]any, usage []orchUsageReport) (orchAckResponse, error) {
 	var resp orchAckResponse
-	err := c.noiseCall("/w/v1/ack", orchAckRequest{WorkerID: workerID, AppliedVersion: seq, SelfCheck: "ok", EgressIPObserved: egressIP, SelfDescribe: self, Usage: usage}, &resp)
+	err := c.noiseCall("/w/v1/ack", orchAckRequest{WorkerID: workerID, AppliedVersion: seq, SelfCheck: selfCheckStatus(), EgressIPObserved: egressIP, SelfDescribe: self, Usage: usage}, &resp)
 	return resp, err
 }
 

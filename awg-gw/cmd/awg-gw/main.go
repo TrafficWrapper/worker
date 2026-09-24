@@ -415,11 +415,13 @@ var privateDestinations6 = []string{
 }
 
 func configureClientIsolation(name string) error {
-	if strings.TrimSpace(os.Getenv("WORKER_ALLOW_PRIVATE_EGRESS")) == "1" {
+	allowPrivate := strings.TrimSpace(os.Getenv("WORKER_ALLOW_PRIVATE_EGRESS")) == "1"
+	blockSMTP := strings.TrimSpace(os.Getenv("WORKER_BLOCK_SMTP")) != "0"
+	if allowPrivate && !blockSMTP {
 		fmt.Println("client_isolation=disabled by WORKER_ALLOW_PRIVATE_EGRESS=1")
 		return nil
 	}
-	for _, args := range clientIsolationCommands(name) {
+	for _, args := range clientIsolationCommands(name, !allowPrivate, blockSMTP) {
 		cmd := exec.Command(args[0], args[1:]...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -430,19 +432,28 @@ func configureClientIsolation(name string) error {
 			return fmt.Errorf("%s failed: %w: %s", strings.Join(args, " "), err, msg)
 		}
 	}
-	fmt.Printf("client_isolation=enabled iface=%s\n", name)
+	fmt.Printf("client_isolation=enabled iface=%s private=%t smtp=%t\n", name, !allowPrivate, blockSMTP)
 	return nil
 }
 
-func clientIsolationCommands(name string) [][]string {
+func clientIsolationCommands(name string, blockPrivate, blockSMTP bool) [][]string {
 	table := natTableName(name) + "_isolation"
-	return [][]string{
+	commands := [][]string{
 		{"nft", "add", "table", "inet", table},
 		{"nft", "add", "chain", "inet", table, "forward", "{", "type", "filter", "hook", "forward", "priority", "0", ";", "policy", "accept", ";", "}"},
 		{"nft", "flush", "chain", "inet", table, "forward"},
-		{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip", "daddr", "{", strings.Join(privateDestinations, ", "), "}", "drop"},
-		{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip6", "daddr", "{", strings.Join(privateDestinations6, ", "), "}", "drop"},
 	}
+	if blockPrivate {
+		commands = append(commands,
+			[]string{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip", "daddr", "{", strings.Join(privateDestinations, ", "), "}", "drop"},
+			[]string{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip6", "daddr", "{", strings.Join(privateDestinations6, ", "), "}", "drop"},
+		)
+	}
+	if blockSMTP {
+		// Outbound mail from a worker IP gets the host blacklisted.
+		commands = append(commands, []string{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "tcp", "dport", "{", "25, 465, 587", "}", "drop"})
+	}
+	return commands
 }
 
 func natTableName(iface string) string {

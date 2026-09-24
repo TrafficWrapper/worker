@@ -54,6 +54,9 @@ root на worker host с установленным `tcpdump`:
 ```sh
 sudo python3 tools/dpi_probe.py --interface <iface> --dialect /worker-state/awg/awg-gw.json --json
 python3 tools/dpi_probe.py --pcap capture.pcap --dialect /worker-state/awg/awg-gw.json --awg-port <udp-port>
+# REALITY: compare what a prober without a client key sees with the real site
+# (run from outside the worker, ideally from the censored network).
+python3 tools/dpi_probe.py --reality <worker-ip>:<xray-port> --sni <CAMOUFLAGE_DOMAIN>
 ```
 
 Probe читает public worker dialect envelope (`listen_port` + `dialect`) и
@@ -91,6 +94,13 @@ scrape_configs:
 groups:
   - name: trafficwrapper-worker
     rules:
+      - alert: TWWorkerCamouflageProbeFailed
+        expr: tw_worker_probe_ok == 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.probe }} probe failed; see self-describe health and agent logs"
       - alert: TWWorkerAWGInterfaceDown
         expr: tw_worker_awg_interface_up == 0
         for: 2m
@@ -224,6 +234,9 @@ binaries:
 | `PUBLIC_ADDRESS` | Public DNS/IP worker, который увидят clients. | Опц. | detected egress IP | `worker1.example.com` или public IPv4. |
 | `EGRESS_IP` | Явный public egress IP, который увидят clients и ORCH ack. Переопределяет сохранённый bootstrap state. | Опц. | public echo-IP probe, затем local route fallback | Задайте, если auto-detect ошибся. |
 | `CAPACITY` | Capacity hint для orchestrator. | Опц. | `32` | Любое положительное число; невалидное значение останавливает agent. |
+| `WORKER_BLOCK_SMTP` | Блокирует клиентам исходящую почту на порты 25/465/587 (Xray и AWG). | Опц. | `1` | Оставьте `1`: спам с IP воркера приводит к блокировке хоста. |
+| `WORKER_BLOCK_BITTORRENT` | Блокирует BitTorrent для REALITY-клиентов (включает sniffing Xray с `routeOnly`). | Опц. | `1` | Оставьте `1`, чтобы хостер не получал DMCA-жалобы. |
+| `REALITY_PROBE_ADDR` | Адрес, по которому агент проверяет свой REALITY-листенер как цензор без ключа клиента. | Опц. | `xray:8443` | Оставьте default Compose. |
 | `WORKER_ALLOW_PRIVATE_EGRESS` | Разрешает VPN-клиентам доступ к приватным, loopback, link-local (cloud metadata) и внутренним Docker-адресам через воркер. | Опц. | `0` | Оставьте `0`: такие диапазоны блокируют и роутинг Xray, и forward-фильтр `awg-gw`. |
 | `WORKER_SMOKE_PEERS` | Встроенные smoke-учётки (`p0-smoke` в REALITY и smoke-пир AWG). | Опц. | включены в standalone, выключены при `ORCH_URL` | `1` — оставить на воркере с оркестратором для `awg-smoke`, `0` — выключить. |
 | `XRAY_PORT` | Public TCP port, mapped to REALITY container. | Опц. | `2053` | `8444`, `2053` или другой свободный TCP port. |

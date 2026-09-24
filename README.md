@@ -40,7 +40,11 @@ For worker-specific failures, start with enrollment values
 The worker agent exposes `/healthz`, `/self-describe`, and `/metrics` on the
 local agent port (`127.0.0.1:9090` through the default Compose mapping). The
 Prometheus metrics endpoint is intended for localhost scraping because AWG peer
-labels include public keys, allowed IPs, and endpoints.
+labels include public keys, allowed IPs, and endpoints unless
+`TW_METRICS_SCRUB_PEER_LABELS=1`. See [Monitoring](#monitoring).
+
+Every service has a Docker healthcheck, so `docker compose ps` shows which one
+is not ready. Startup order is `agent` → `awg-gw` → `distributor` → `xray`.
 
 For optional wire-level AWG stealth checks, use `tools/dpi_probe.py` as root on
 the worker host with `tcpdump` installed:
@@ -53,6 +57,75 @@ python3 tools/dpi_probe.py --pcap capture.pcap --dialect /worker-state/awg/awg-g
 The probe reads the public worker dialect envelope (`listen_port` + `dialect`)
 and reports whether WG magic headers are absent, padded handshakes are visible,
 vanilla handshakes are absent, and pre-handshake junk matches the dialect.
+
+## Monitoring
+
+`/metrics` is served by the agent on `127.0.0.1:${AGENT_PORT:-9090}`:
+
+```sh
+curl -s http://127.0.0.1:9090/metrics | grep '^tw_worker_'
+```
+
+The port is bound to localhost only. Run Prometheus (or an agent such as
+`vmagent`/Grafana Alloy) on the worker host with host networking, or forward
+the port over SSH; do not publish it. Enable
+`TW_METRICS_SCRUB_PEER_LABELS=1` before metrics leave the host.
+
+Example scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: trafficwrapper-worker
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+        labels:
+          worker: worker1
+```
+
+Example alert rules:
+
+```yaml
+groups:
+  - name: trafficwrapper-worker
+    rules:
+      - alert: TWWorkerAWGInterfaceDown
+        expr: tw_worker_awg_interface_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AWG interface is down on {{ $labels.worker }}"
+      - alert: TWWorkerOrchestratorUnreachable
+        expr: time() - tw_worker_orch_last_success_timestamp_seconds > 600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No successful orchestrator request for 10m on {{ $labels.worker }}"
+      - alert: TWWorkerXrayRestartLoop
+        expr: increase(tw_worker_xray_apply_total{mode="restart"}[1h]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Xray restarted more than 3 times in 1h on {{ $labels.worker }}"
+      - alert: TWWorkerDistributorCertExpiring
+        expr: tw_worker_distributor_cert_expiry_seconds < 7 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Distributor TLS certificate expires in less than 7 days on {{ $labels.worker }}"
+      - alert: TWWorkerConfigNotApplied
+        expr: tw_worker_orch_desired_seq - tw_worker_orch_applied_seq > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker has not applied the latest orchestrator config for 15m on {{ $labels.worker }}"
+```
+
+The orchestrator alerts only make sense in platform mode (`ORCH_URL` set).
 
 ## What Is Included
 
@@ -144,6 +217,7 @@ binaries:
 | `ORCH_STATIC_PUBLIC_KEY` | Pinned orchestrator Noise static public key. | Required for platform mode | empty | Run `orchestrator public-key` on the orchestrator. |
 | `ENROLL_TOKEN` | One-time worker enrollment token. | Required for first enroll | empty | Create it in the orchestrator admin UI or CLI. |
 | `ORCH_INSECURE_TLS` | Allows insecure TLS to the orchestrator for local dev. Required when ORCH uses the default self-signed `ORCH_TLS=1`. | Required for self-signed ORCH | `0` | Set `1` for test/self-signed ORCH only; keep `0` with real production TLS. |
+| `ORCH_ACK_INTERVAL` | How often the agent acknowledges the applied config to the orchestrator. | Optional | `90s` | Go duration between `10s` and `1h`. |
 | `PUBLIC_ADDRESS` | Public DNS name or IP advertised to clients. | Optional | detected egress IP | `worker1.example.com` or a public IPv4. |
 | `EGRESS_IP` | Explicit public egress IP advertised to clients and sent in worker ack. Overrides persisted bootstrap state. | Optional | public echo-IP probe, then local route fallback | Set if auto-detection is wrong. |
 | `CAPACITY` | Capacity hint reported to the orchestrator. | Optional | `32` | Any positive integer; invalid values stop the agent. |
@@ -158,6 +232,10 @@ binaries:
 | `AWG_SERVER_KEEPALIVE` | Server-side persistent keepalive policy for every AWG peer. | Optional | `0` | Runtime rollback: set the previous value, then restart both `agent` and `awg-gw`. |
 | `XRAY_CONTAINER_NAME` | Docker container the agent uses for Xray user updates. Device changes are applied live through the Xray API; other config changes restart the container. Fallback discovery is limited to the agent's own compose project. | Optional | `worker-xray-1` | Compose sets a stable `container_name` with this value; override only if you also change the xray service container name. |
 | `DOCKER_SOCKET` | Docker socket path used by the agent. | Optional | `/var/run/docker.sock` | Compose mounts the host Docker socket. |
+| `LOG_LEVEL` | Agent log level. | Optional | `info` | `debug`, `info`, `warn` or `error`. |
+| `AWG_LOG_LEVEL` | `awg-gw` (AmneziaWG device) log level. | Optional | `error` | `verbose`, `error` or `silent`. |
+| `TW_METRICS_SCRUB_PEER_LABELS` | Replaces AWG peer public keys in `/metrics` labels with salted hashes and drops the `allowed_ip`/`endpoint` labels. | Optional | `0` | Set `1` when metrics leave the host (remote Prometheus, shared dashboards). |
+| `TW_METRICS_SCRUB_SALT` | Salt for scrubbed peer labels. | Optional | generated once into `worker-state/metrics_salt` | Set the same value on several workers to correlate peers across them. |
 | `DISTRIBUTOR_URL` | Internal URL of the `/tw/` distributor. | Optional | `http://awg-gw:8080/tw` | Keep default for Compose. |
 | `WORKER_AGENT_URL` | Public/internal URL override for agent self-reference. | Optional | empty | Set only for custom deployments. |
 | `CAMOUFLAGE_DOMAIN` | REALITY serverName/camouflage SNI and fallback identity. | Required for REALITY | empty, refused until set | Use a real TLS 1.3 domain that fits your deployment; `example.com` and `example.org` are rejected. |
@@ -175,6 +253,7 @@ binaries:
 | `COMPOSE` | Compose command used by `install.sh`/`uninstall.sh`. | Optional | `docker compose` | `docker-compose` on older hosts. |
 | `REALITY_PORT_POOL` | TCP port pool used by `install.sh` auto-selection. | Optional | `8444 2053 2083` | Quoted space-separated list. |
 | `AWG_PORT_POOL` | UDP port pool used by `install.sh` auto-selection. | Optional | `51888 51889 51890 51891` | Quoted space-separated list. |
+| `WAIT_TIMEOUT` | Seconds `install.sh` waits for all services to become healthy. | Optional | `180` | Raise on slow hosts where the first build takes longer. |
 | `SERVICE_NAME` | `awg-gw` stub/debug service name. | Optional | `awg-gw` | Only for stub/manual runs. |
 | `AWG_LISTEN_UDP` | `awg-gw` stub/debug UDP listen value. | Optional | `51821` | Only for stub/manual runs. |
 | `AWG_ENDPOINT` | Endpoint used by the `awg-smoke` profile. | Optional | `host.docker.internal:51888` | Set to the worker public endpoint for remote smoke tests. |
@@ -189,6 +268,59 @@ edit `AWG_SERVER_KEEPALIVE` in `.env` and restart both services to roll back
 without rebuilding. Disabling server keepalive is not proof that idle clients
 remain reachable behind carrier NAT; that requires the separate device test and
 operator confirmation described by the deployment plan.
+
+## Backup / upgrade / rollback
+
+All worker identity and generated material lives in `./worker-state` (owned by
+root, secrets are mode `0600`):
+
+| Path | Contents |
+| --- | --- |
+| `bootstrap.json` | REALITY key pair, AWG server key, dialect, Noise static key (worker identity towards the orchestrator). |
+| `awg/` | `awg-gw.json` (interface + dialect) and `peers.json` (materialized AWG peers). |
+| `xray/` | Generated Xray REALITY `config.json`. |
+| `distributor/certs/` | Distributor TLS certificate and key; `distributor/tw/` holds published client files. |
+| `orch/` | `state.json` (enrollment/sequence state), last signed `worker-config.json` + `.minisig`. |
+| `metrics_salt` | Salt for scrubbed metrics labels (created when `TW_METRICS_SCRUB_PEER_LABELS=1` and no salt is set). |
+
+Losing `bootstrap.json` means new REALITY/AWG/Noise keys: every client must be
+re-provisioned and the worker re-enrolled. Back up `worker-state/` and `.env`
+together, and keep the archive as secret as the keys themselves:
+
+```sh
+sudo tar -czf worker-backup-$(date -u +%Y%m%dT%H%M%SZ).tgz worker-state .env
+```
+
+`./uninstall.sh` writes the same archive (`worker-state-backup-<UTC>.tgz`)
+before deleting state. Flags: `--yes` (no prompt, required without a TTY),
+`--keep-state`, `--purge-images` (also removes locally built images and the
+`awg-run` volume).
+
+Move a worker to another host: stop it (`docker compose down`), copy the
+archive, clone the same release on the new host, extract the archive into the
+checkout, update `PUBLIC_ADDRESS`/`EGRESS_IP` if the address changed, then
+`docker compose up -d --build --wait`. Never run two workers with the same
+`worker-state` at the same time.
+
+Upgrade:
+
+```sh
+git pull
+docker compose up -d --build --wait
+```
+
+`git pull && ./install.sh` also works, but `install.sh` regenerates `.env` from
+`.env.example` (the previous file is saved as `.env.bak.<UTC>`) and only carries over
+ports, subnet, egress IP and `CAMOUFLAGE_DOMAIN`; merge `ORCH_*` and other
+settings back from the backup and run `docker compose up -d` again.
+
+Rollback to a previous release (take a backup first; state written by a newer
+version is not guaranteed to be readable by an older one):
+
+```sh
+git checkout <tag>
+docker compose up -d --build
+```
 
 ## Local Build Checks
 

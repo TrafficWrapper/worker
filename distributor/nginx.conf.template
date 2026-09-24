@@ -18,6 +18,13 @@ server {
     server_name _;
     client_max_body_size 128k;
 
+    location = /healthz {
+        allow 127.0.0.1;
+        deny all;
+        access_log off;
+        return 200;
+    }
+
     location = /tw/telemetry {
         proxy_pass http://agent:9090/orchestrator/telemetry;
         proxy_http_version 1.1;

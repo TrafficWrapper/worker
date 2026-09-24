@@ -197,10 +197,6 @@ func distributorCertExpiry(cfg envConfig) (time.Time, bool) {
 	return cert.NotAfter, true
 }
 
-func writeAWGMetrics(w io.Writer, iface string, startedAt time.Time, peers []awgPeerConfig) {
-	writeAWGMetricsWithOptions(w, iface, startedAt, peers, metricsOptions{})
-}
-
 type metricsOptions struct {
 	ScrubPeerLabels bool
 	Salt            string

@@ -18,8 +18,6 @@ type usageState map[string]usageSnapshot
 
 type awgUsageState = usageState
 
-type awgUsageSnapshot = usageSnapshot
-
 type usageSnapshot struct {
 	RxBytes     uint64    `json:"rx_bytes,omitempty"`
 	TxBytes     uint64    `json:"tx_bytes,omitempty"`

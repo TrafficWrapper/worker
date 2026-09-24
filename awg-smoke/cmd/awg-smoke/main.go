@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +19,7 @@ import (
 
 	"github.com/TrafficWrapper/worker/core/awg/device"
 	"github.com/TrafficWrapper/worker/core/awg/dialect"
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 const (
@@ -135,15 +134,15 @@ func configureDevice(dev *device.Device, st stateFile, endpoint string) error {
 	if err != nil {
 		return err
 	}
-	privateHex, err := base64KeyToHex(st.AWG.SmokePrivate)
+	privateHex, err := serverpeer.KeyB64ToHex(st.AWG.SmokePrivate)
 	if err != nil {
 		return fmt.Errorf("smoke private key: %w", err)
 	}
-	serverHex, err := base64KeyToHex(st.AWG.PublicKey)
+	serverHex, err := serverpeer.KeyB64ToHex(st.AWG.PublicKey)
 	if err != nil {
 		return fmt.Errorf("server public key: %w", err)
 	}
-	pskHex, err := base64KeyToHex(st.AWG.SmokePSK)
+	pskHex, err := serverpeer.KeyB64ToHex(st.AWG.SmokePSK)
 	if err != nil {
 		return fmt.Errorf("psk2: %w", err)
 	}
@@ -268,17 +267,6 @@ func smokeInterfacePrefix(smokeIP string) (string, error) {
 		return "", fmt.Errorf("smoke_ip must be IPv4")
 	}
 	return addr.String() + "/24", nil
-}
-
-func base64KeyToHex(value string) (string, error) {
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
-	if err != nil {
-		return "", err
-	}
-	if len(raw) != 32 {
-		return "", fmt.Errorf("expected 32 bytes, got %d", len(raw))
-	}
-	return hex.EncodeToString(raw), nil
 }
 
 func getenv(key, fallback string) string {

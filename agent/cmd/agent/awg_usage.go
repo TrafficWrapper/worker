@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 // usageStateRetention bounds usage state files: entries for devices or keys
@@ -49,7 +51,7 @@ func collectAWGUsageReports(cfg envConfig, devices []approvedDevice) ([]orchUsag
 	reports, next := buildAWGUsageReports(devices, allPeers, state, now)
 	next.prune(now)
 	if err := saveAWGUsageState(cfg.StateDir, next); err != nil {
-		log.Printf("awg usage state save failed: %v", err)
+		slog.Warn("awg usage state save failed", "err", err)
 	}
 	return reports, nil
 }
@@ -109,9 +111,9 @@ func buildAWGUsageReportForDevice(device approvedDevice, deviceID string, peerBy
 	totalRx := uint64(0)
 	totalTx := uint64(0)
 	for _, creds := range candidates {
-		pubHex, err := base64KeyToHex(creds.AWGPublicKey)
+		pubHex, err := serverpeer.KeyB64ToHex(creds.AWGPublicKey)
 		if err != nil {
-			log.Printf("awg usage skips device %s profile key: %v", device.DeviceID, err)
+			slog.Warn("awg usage skips device profile key", "device_id", device.DeviceID, "err", err)
 			continue
 		}
 		peers := peerByHex[pubHex]
@@ -180,7 +182,7 @@ func loadUsageState(path string) usageState {
 	}
 	var state usageState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		log.Printf("usage state %s ignored: %v", path, err)
+		slog.Warn("usage state ignored", "path", path, "err", err)
 		return usageState{}
 	}
 	if state == nil {

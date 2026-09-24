@@ -1,18 +1,21 @@
 package main
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 func TestSyncAWGUAPISendsOnlyTheDifferenceInOneSet(t *testing.T) {
 	keep, keepHex := keyB64(21), ""
 	add := keyB64(22)
 	var err error
-	if keepHex, err = base64KeyToHex(keep); err != nil {
+	if keepHex, err = serverpeer.KeyB64ToHex(keep); err != nil {
 		t.Fatal(err)
 	}
 	staleHex := strings.Repeat("c", 64)
@@ -33,7 +36,7 @@ func TestSyncAWGUAPISendsOnlyTheDifferenceInOneSet(t *testing.T) {
 	if _, ok := fake.peer(staleHex); ok {
 		t.Fatal("stale peer not removed")
 	}
-	addHex, _ := base64KeyToHex(add)
+	addHex, _ := serverpeer.KeyB64ToHex(add)
 	if _, ok := fake.peer(addHex); !ok {
 		t.Fatal("new peer not added")
 	}
@@ -53,7 +56,7 @@ func TestSyncAWGUAPISendsOnlyTheDifferenceInOneSet(t *testing.T) {
 }
 
 func TestAWGPeerMatchesComparesReportedPSK(t *testing.T) {
-	pskHex, _ := base64KeyToHex(keyB64(3))
+	pskHex, _ := serverpeer.KeyB64ToHex(keyB64(3))
 	live := awgPeerConfig{AllowedIPs: []string{"10.13.13.5/32"}, PresharedKeyHex: pskHex}
 	want := awgDesiredPeer{PSK2: keyB64(3), AllowedIP: "10.13.13.5/32"}
 	if !awgPeerMatches(live, want, 0) {
@@ -120,7 +123,7 @@ func TestMetricsExposeAgentSeriesWithTypes(t *testing.T) {
 }
 
 func TestParseLogLevelAndAckInterval(t *testing.T) {
-	if parseLogLevel("DEBUG") != logLevelDebug || parseLogLevel("") != logLevelInfo || parseLogLevel("error") != logLevelError {
+	if parseLogLevel("DEBUG") != slog.LevelDebug || parseLogLevel("") != slog.LevelInfo || parseLogLevel("warning") != slog.LevelWarn || parseLogLevel("error") != slog.LevelError {
 		t.Fatal("log level parsing is wrong")
 	}
 	t.Setenv("WORKER_STATE_DIR", t.TempDir())

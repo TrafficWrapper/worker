@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -429,10 +431,46 @@ func TestOrchPostJSONDecodesStreamAndReportsHTTPErrors(t *testing.T) {
 	defer srv.Close()
 	client := &orchClient{cfg: envConfig{OrchURL: srv.URL}, http: srv.Client()}
 	var resp orchAckResponse
-	if err := client.postJSON("/ok", map[string]any{}, &resp); err != nil || !resp.OK || resp.Error != "x" {
+	if err := client.postJSON(context.Background(), "/ok", map[string]any{}, &resp); err != nil || !resp.OK || resp.Error != "x" {
 		t.Fatalf("resp=%+v err=%v", resp, err)
 	}
-	if err := client.postJSON("/fail", map[string]any{}, &resp); err == nil || !strings.Contains(err.Error(), "http 502") {
+	if err := client.postJSON(context.Background(), "/fail", map[string]any{}, &resp); err == nil || !strings.Contains(err.Error(), "http 502") {
 		t.Fatalf("expected http error, got %v", err)
 	}
+}
+
+func TestOrchPostJSONStopsOnContextCancel(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	client := &orchClient{cfg: envConfig{OrchURL: srv.URL}, http: srv.Client()}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var resp orchNudgeResponse
+	started := time.Now()
+	err := client.postJSON(ctx, "/w/v1/nudge/wait", map[string]any{}, &resp)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline error, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("postJSON returned after %s", elapsed)
+	}
+}
+
+func TestWaitTimeout(t *testing.T) {
+	var wg sync.WaitGroup
+	if !waitTimeout(&wg, time.Second) {
+		t.Fatal("empty wait group reported timeout")
+	}
+	wg.Add(1)
+	if waitTimeout(&wg, 10*time.Millisecond) {
+		t.Fatal("pending wait group reported done")
+	}
+	wg.Done()
 }

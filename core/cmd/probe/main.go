@@ -25,6 +25,7 @@ import (
 
 	"github.com/TrafficWrapper/worker/core/awg/device"
 	awgdialect "github.com/TrafficWrapper/worker/core/awg/dialect"
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 const (
@@ -265,11 +266,11 @@ func configureDevice(dev *device.Device, privateKey []byte, resp provisionRespon
 	if err != nil {
 		return err
 	}
-	serverHex, err := base64KeyToHex(resp.ServerPublicKey)
+	serverHex, err := serverpeer.KeyB64ToHex(resp.ServerPublicKey)
 	if err != nil {
 		return fmt.Errorf("server public key: %w", err)
 	}
-	pskHex, err := base64KeyToHex(resp.PSK2)
+	pskHex, err := serverpeer.KeyB64ToHex(resp.PSK2)
 	if err != nil {
 		return fmt.Errorf("psk2: %w", err)
 	}
@@ -525,14 +526,6 @@ func decodeKeyBase64(value string) ([]byte, error) {
 
 func keyToBase64(key []byte) string {
 	return base64.StdEncoding.EncodeToString(key)
-}
-
-func base64KeyToHex(value string) (string, error) {
-	raw, err := decodeKeyBase64(value)
-	if err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(raw), nil
 }
 
 func bytesToHexKey(value []byte) (string, error) {

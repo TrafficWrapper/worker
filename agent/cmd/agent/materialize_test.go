@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/TrafficWrapper/worker/core/awg/dialect"
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 func TestApprovedDevicesMaterializeToXrayAndAWGRegistry(t *testing.T) {
@@ -227,7 +228,7 @@ func TestAWGRegistrySkipsForeignAndDuplicateInternalIPs(t *testing.T) {
 func TestSyncAWGUAPISkipsRemovalWhenDesiredSetIsIncomplete(t *testing.T) {
 	staleHex := strings.Repeat("a", 64)
 	validKey := keyB64(9)
-	validHex, err := base64KeyToHex(validKey)
+	validHex, err := serverpeer.KeyB64ToHex(validKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +620,7 @@ func writeCachedApprovedDevicesForTest(t *testing.T, stateDir string, devices []
 
 func TestReconcileAWGPeersRepairsKeepaliveDriftAcrossProfilesWithoutExtraWrites(t *testing.T) {
 	profilePublic := keyB64(21)
-	profilePublicHex, err := base64KeyToHex(profilePublic)
+	profilePublicHex, err := serverpeer.KeyB64ToHex(profilePublic)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -45,7 +45,7 @@ func collectRealityUsageReports(cfg envConfig, devices []approvedDevice) ([]orch
 	state := loadUsageState(realityUsageStatePath(cfg.StateDir))
 	reports := accumulateRealityUsage(deltas, state, time.Now().UTC())
 	if err := saveUsageState(realityUsageStatePath(cfg.StateDir), state); err != nil {
-		log.Printf("reality usage state save failed: %v", err)
+		slog.Warn("reality usage state save failed", "err", err)
 	}
 	return reports, nil
 }

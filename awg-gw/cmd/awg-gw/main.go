@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,16 +34,7 @@ const (
 
 var version = "dev"
 
-type Config struct {
-	Interface       string  `json:"interface"`
-	Address         string  `json:"address"`
-	ListenPort      int     `json:"listen_port"`
-	PrivateKeyHex   string  `json:"private_key_hex"`
-	PublicKey       string  `json:"public_key"`
-	Dialect         Dialect `json:"dialect"`
-	PeerRegistry    string  `json:"peer_registry,omitempty"`
-	ServerKeepalive int     `json:"server_keepalive,omitempty"`
-}
+type Config = serverpeer.GatewayConfig
 
 type Dialect = awgdialect.Dialect
 
@@ -59,18 +48,10 @@ type publicConfig struct {
 	ServerKeepalive int     `json:"server_keepalive"`
 }
 
-type registryFile struct {
-	Clients []registryClient `json:"clients"`
-}
-
-type registryClient struct {
-	WGPublicKey  string    `json:"wg_public_key"`
-	InternalIP   string    `json:"internal_ip"`
-	PSK2         string    `json:"psk2"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	DownloadMbps int       `json:"download_mbps,omitempty"`
-	UploadMbps   int       `json:"upload_mbps,omitempty"`
-}
+type (
+	registryFile   = serverpeer.Registry
+	registryClient = serverpeer.RegistryClient
+)
 
 type restoredPeer struct {
 	PublicKeyHex string
@@ -306,7 +287,7 @@ func loadActivePeers(path string, now time.Time) ([]restoredPeer, error) {
 		if !client.ExpiresAt.IsZero() && !client.ExpiresAt.After(now) {
 			continue
 		}
-		peer, err := client.restoredPeer()
+		peer, err := restoredPeerFromClient(client)
 		if err != nil {
 			// A single malformed entry must not keep the whole gateway down.
 			fmt.Fprintf(os.Stderr, "warning: registry client %d skipped: %v\n", i, err)
@@ -317,12 +298,12 @@ func loadActivePeers(path string, now time.Time) ([]restoredPeer, error) {
 	return peers, nil
 }
 
-func (client registryClient) restoredPeer() (restoredPeer, error) {
-	publicHex, err := base64KeyToHex(client.WGPublicKey)
+func restoredPeerFromClient(client registryClient) (restoredPeer, error) {
+	publicHex, err := serverpeer.KeyB64ToHex(client.WGPublicKey)
 	if err != nil {
 		return restoredPeer{}, fmt.Errorf("wg_public_key: %w", err)
 	}
-	pskHex, err := base64KeyToHex(client.PSK2)
+	pskHex, err := serverpeer.KeyB64ToHex(client.PSK2)
 	if err != nil {
 		return restoredPeer{}, fmt.Errorf("psk2: %w", err)
 	}
@@ -335,17 +316,6 @@ func (client registryClient) restoredPeer() (restoredPeer, error) {
 	}
 	client.InternalIP = prefix.String()
 	return restoredPeer{PublicKeyHex: publicHex, PSKHex: pskHex, AllowedIP: client.InternalIP}, nil
-}
-
-func base64KeyToHex(value string) (string, error) {
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
-	if err != nil {
-		return "", err
-	}
-	if len(raw) != 32 {
-		return "", fmt.Errorf("expected 32 bytes, got %d", len(raw))
-	}
-	return hex.EncodeToString(raw), nil
 }
 
 func configureInterface(name, address string, mtu int) error {

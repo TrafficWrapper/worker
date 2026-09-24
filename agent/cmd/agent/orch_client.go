@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	mathrand "math/rand/v2"
 	"net/http"
 	"os"
@@ -206,10 +206,10 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 	pullNeeded := true
 	for ctx.Err() == nil {
 		if state.WorkerID == "" {
-			resp, err := client.enroll(cfg.EnrollToken, selfDescribe(cfg, st))
+			resp, err := client.enroll(ctx, cfg.EnrollToken, selfDescribe(cfg, st))
 			recordOrchRequest("enroll", err)
 			if err != nil {
-				log.Printf("orch enroll failed: %v", err)
+				slog.Warn("orch enroll failed", "err", err)
 				sleepCtx(ctx, retry.next())
 				continue
 			}
@@ -217,13 +217,13 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			state.Status = resp.Status
 			state.SignerPublicKey = resp.SignerPublicKey
 			_ = saveOrchState(cfg.StateDir, state)
-			log.Printf("orch enroll status=%s worker_id=%s", state.Status, state.WorkerID)
+			slog.Info("orch enroll", "status", state.Status, "worker_id", state.WorkerID)
 		}
 		if pullNeeded || time.Since(lastPull) >= orchForcedPullInterval {
-			pull, err := client.pull(state.WorkerID, state.AppliedSeq)
+			pull, err := client.pull(ctx, state.WorkerID, state.AppliedSeq)
 			recordOrchRequest("pull", err)
 			if err != nil {
-				log.Printf("orch pull failed: %v", err)
+				slog.Warn("orch pull failed", "err", err)
 				sleepCtx(ctx, retry.next())
 				continue
 			}
@@ -234,7 +234,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			if !pull.OK {
 				state.Status = pull.Status
 				_ = saveOrchState(cfg.StateDir, state)
-				log.Printf("orch pull pending/error status=%s error=%s", pull.Status, pull.Error)
+				slog.Warn("orch pull pending/error", "status", pull.Status, "error", pull.Error)
 				sleepCtx(ctx, retry.next())
 				continue
 			}
@@ -244,7 +244,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				seq, clientSeq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)
 				applyDurationMillis.Store(time.Since(started).Milliseconds())
 				if err != nil {
-					log.Printf("orch apply rejected: %v", err)
+					slog.Error("orch apply rejected", "err", err)
 					sleepCtx(ctx, retry.next())
 					continue
 				}
@@ -255,8 +255,8 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				if orchDesiredSeqGauge.Load() < seq {
 					orchDesiredSeqGauge.Store(seq)
 				}
-				log.Printf("orch applied seq=%d in %s", seq, time.Since(started).Round(time.Millisecond))
-				reportOrchAck(client, cfg, st, state.WorkerID, seq)
+				slog.Info("orch applied", "seq", seq, "duration", time.Since(started).Round(time.Millisecond))
+				reportOrchAck(ctx, client, cfg, st, state.WorkerID, seq)
 				lastAck = time.Now()
 				retry.reset()
 				continue
@@ -266,10 +266,10 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			retry.reset()
 		}
 		started := time.Now()
-		nudge, err := client.nudge(state.WorkerID, state.AppliedSeq, selfDescribe(cfg, st))
+		nudge, err := client.nudge(ctx, state.WorkerID, state.AppliedSeq, selfDescribe(cfg, st))
 		recordOrchRequest("nudge", err)
 		if err != nil {
-			log.Printf("orch nudge failed: %v", err)
+			slog.Warn("orch nudge failed", "err", err)
 			pullNeeded = true
 			sleepCtx(ctx, retry.next())
 			continue
@@ -281,13 +281,13 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 		if nudge.DesiredSeq > state.AppliedSeq {
 			pullNeeded = true
 		} else {
-			logDebugf("orch nudge heartbeat desired=%d applied=%d", nudge.DesiredSeq, state.AppliedSeq)
+			slog.Debug("orch nudge heartbeat", "desired", nudge.DesiredSeq, "applied", state.AppliedSeq)
 		}
 		if time.Since(lastAck) >= cfg.OrchAckInterval {
-			reportOrchAck(client, cfg, st, state.WorkerID, state.AppliedSeq)
+			reportOrchAck(ctx, client, cfg, st, state.WorkerID, state.AppliedSeq)
 			reconcileStarted := time.Now()
 			if err := reconcileAWGPeers(cfg, st); err != nil {
-				log.Printf("awg periodic reconcile incomplete: %v", err)
+				slog.Warn("awg periodic reconcile incomplete", "err", err)
 			}
 			awgReconcileMillisTotal.Add(time.Since(reconcileStarted).Milliseconds())
 			lastAck = time.Now()
@@ -300,14 +300,14 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 	}
 }
 
-func reportOrchAck(client *orchClient, cfg envConfig, st stateFile, workerID string, seq int64) {
+func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st stateFile, workerID string, seq int64) {
 	devices := cachedApprovedDevices(cfg.StateDir)
 	approvedDevicesGauge.Store(int64(len(filterUnexpiredApprovedDevices(devices, time.Now().UTC()))))
 	usage := collectWorkerUsageReports(cfg, devices)
-	ack, err := client.ack(workerID, seq, cfg.EgressIP, selfDescribe(cfg, st), usage)
+	ack, err := client.ack(ctx, workerID, seq, cfg.EgressIP, selfDescribe(cfg, st), usage)
 	recordOrchRequest("ack", err)
 	if err != nil {
-		log.Printf("orch ack failed: %v", err)
+		slog.Warn("orch ack failed", "err", err)
 		return
 	}
 	if ack.QuotaBlocks > 0 {
@@ -316,20 +316,20 @@ func reportOrchAck(client *orchClient, cfg envConfig, st stateFile, workerID str
 	if ack.DesiredSeq > 0 {
 		orchDesiredSeqGauge.Store(ack.DesiredSeq)
 	}
-	logDebugf("orch ack ok applied=%d desired=%d egress_probe=%s match=%t", ack.AppliedSeq, ack.DesiredSeq, ack.EgressIPProbe, ack.EgressMatch)
+	slog.Debug("orch ack ok", "applied", ack.AppliedSeq, "desired", ack.DesiredSeq, "egress_probe", ack.EgressIPProbe, "match", ack.EgressMatch)
 	if !ack.EgressMatch && ack.EgressIPProbe != "" {
-		log.Printf("orch reports egress mismatch: observed=%s configured=%s", ack.EgressIPProbe, cfg.EgressIP)
+		slog.Warn("orch reports egress mismatch", "observed", ack.EgressIPProbe, "configured", cfg.EgressIP)
 	}
 }
 
 func collectWorkerUsageReports(cfg envConfig, devices []approvedDevice) []orchUsageReport {
 	usage, err := collectAWGUsageReports(cfg, devices)
 	if err != nil {
-		log.Printf("awg usage report skipped: %v", err)
+		slog.Warn("awg usage report skipped", "err", err)
 	}
 	reality, err := collectRealityUsageReports(cfg, devices)
 	if err != nil {
-		log.Printf("reality usage report skipped: %v", err)
+		slog.Warn("reality usage report skipped", "err", err)
 	} else {
 		usage = append(usage, reality...)
 	}
@@ -359,36 +359,36 @@ func newOrchClient(cfg envConfig, st stateFile) (*orchClient, error) {
 	return &orchClient{cfg: cfg, staticKey: key, serverPub: serverPub, http: &http.Client{Transport: tr, Timeout: 35 * time.Second}}, nil
 }
 
-func (c *orchClient) enroll(token string, self map[string]any) (orchEnrollResponse, error) {
+func (c *orchClient) enroll(ctx context.Context, token string, self map[string]any) (orchEnrollResponse, error) {
 	var resp orchEnrollResponse
-	err := c.noiseCall("/w/v1/enroll", orchEnrollRequest{Token: token, WorkerStaticPub: protocol.KeyToBase64(c.staticKey.Public), SelfDescribe: self}, &resp)
+	err := c.noiseCall(ctx, "/w/v1/enroll", orchEnrollRequest{Token: token, WorkerStaticPub: protocol.KeyToBase64(c.staticKey.Public), SelfDescribe: self}, &resp)
 	return resp, err
 }
 
-func (c *orchClient) pull(workerID string, have int64) (orchPullResponse, error) {
+func (c *orchClient) pull(ctx context.Context, workerID string, have int64) (orchPullResponse, error) {
 	var resp orchPullResponse
-	err := c.noiseCall("/w/v1/config/pull", orchPullRequest{WorkerID: workerID, HaveSeq: have}, &resp)
+	err := c.noiseCall(ctx, "/w/v1/config/pull", orchPullRequest{WorkerID: workerID, HaveSeq: have}, &resp)
 	return resp, err
 }
 
-func (c *orchClient) ack(workerID string, seq int64, egressIP string, self map[string]any, usage []orchUsageReport) (orchAckResponse, error) {
+func (c *orchClient) ack(ctx context.Context, workerID string, seq int64, egressIP string, self map[string]any, usage []orchUsageReport) (orchAckResponse, error) {
 	var resp orchAckResponse
-	err := c.noiseCall("/w/v1/ack", orchAckRequest{WorkerID: workerID, AppliedVersion: seq, SelfCheck: selfCheckStatus(), EgressIPObserved: egressIP, SelfDescribe: self, Usage: usage}, &resp)
+	err := c.noiseCall(ctx, "/w/v1/ack", orchAckRequest{WorkerID: workerID, AppliedVersion: seq, SelfCheck: selfCheckStatus(), EgressIPObserved: egressIP, SelfDescribe: self, Usage: usage}, &resp)
 	return resp, err
 }
 
-func (c *orchClient) nudge(workerID string, have int64, self map[string]any) (orchNudgeResponse, error) {
+func (c *orchClient) nudge(ctx context.Context, workerID string, have int64, self map[string]any) (orchNudgeResponse, error) {
 	var resp orchNudgeResponse
-	err := c.noiseCall("/w/v1/nudge/wait", orchNudgeRequest{WorkerID: workerID, HaveSeq: have, SelfDescribe: self}, &resp)
+	err := c.noiseCall(ctx, "/w/v1/nudge/wait", orchNudgeRequest{WorkerID: workerID, HaveSeq: have, SelfDescribe: self}, &resp)
 	return resp, err
 }
 
-func (c *orchClient) telemetry(workerID string, payload []byte, headers map[string]string) error {
+func (c *orchClient) telemetry(ctx context.Context, workerID string, payload []byte, headers map[string]string) error {
 	var resp struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error,omitempty"`
 	}
-	err := c.noiseCall("/w/v1/telemetry", orchTelemetryRequest{
+	err := c.noiseCall(ctx, "/w/v1/telemetry", orchTelemetryRequest{
 		WorkerID:      workerID,
 		PayloadBase64: base64.StdEncoding.EncodeToString(payload),
 		Headers:       headers,
@@ -403,7 +403,7 @@ func (c *orchClient) telemetry(workerID string, payload []byte, headers map[stri
 	return nil
 }
 
-func (c *orchClient) noiseCall(path string, req any, resp any) error {
+func (c *orchClient) noiseCall(ctx context.Context, path string, req any, resp any) error {
 	hs, err := noise.NewHandshakeState(noise.Config{
 		CipherSuite:   protocol.CipherSuite(),
 		Pattern:       noise.HandshakeXK,
@@ -420,7 +420,7 @@ func (c *orchClient) noiseCall(path string, req any, resp any) error {
 		return err
 	}
 	var start orchStartResponse
-	if err := c.postJSON("/w/v1/handshake/start", orchStartRequest{Message: base64.StdEncoding.EncodeToString(msg1)}, &start); err != nil {
+	if err := c.postJSON(ctx, "/w/v1/handshake/start", orchStartRequest{Message: base64.StdEncoding.EncodeToString(msg1)}, &start); err != nil {
 		return err
 	}
 	if !start.OK {
@@ -442,7 +442,7 @@ func (c *orchClient) noiseCall(path string, req any, resp any) error {
 		return err
 	}
 	var envResp orchEnvelopeResponse
-	if err := c.postJSON(path, orchEnvelope{SID: start.SID, Message: base64.StdEncoding.EncodeToString(msg3), Payload: base64.StdEncoding.EncodeToString(payload)}, &envResp); err != nil {
+	if err := c.postJSON(ctx, path, orchEnvelope{SID: start.SID, Message: base64.StdEncoding.EncodeToString(msg3), Payload: base64.StdEncoding.EncodeToString(payload)}, &envResp); err != nil {
 		return err
 	}
 	if !envResp.OK {
@@ -455,12 +455,17 @@ func (c *orchClient) noiseCall(path string, req any, resp any) error {
 	return protocol.DecryptJSON(recvCipher, encrypted, resp)
 }
 
-func (c *orchClient) postJSON(path string, req any, resp any) error {
+func (c *orchClient) postJSON(ctx context.Context, path string, req any, resp any) error {
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
-	httpResp, err := c.http.Post(strings.TrimRight(c.cfg.OrchURL, "/")+path, "application/json", bytes.NewReader(raw))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.cfg.OrchURL, "/")+path, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpResp, err := c.http.Do(httpReq)
 	if err != nil {
 		return err
 	}
@@ -491,7 +496,7 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 	clientSeq := state.ClientAppliedSeq
 	clientBundleOK := false
 	if nextClientSeq, err := verifyOrchBundleAllowEqual(clientBundle, state.SignerPublicKey, state.ClientAppliedSeq, "client-config-v1"); err != nil {
-		log.Printf("client bundle apply skipped: %v", err)
+		slog.Warn("client bundle apply skipped", "err", err)
 	} else {
 		clientSeq = nextClientSeq
 		clientBundleOK = true

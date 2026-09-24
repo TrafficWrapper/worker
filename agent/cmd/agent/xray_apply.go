@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -57,11 +57,11 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 				return fmt.Errorf("clear xray restart pending: %w", err)
 			}
 			recordXrayApply("live")
-			log.Printf("xray materialized approved_devices=%d without restart", approvedDeviceCount)
+			slog.Info("xray materialized without restart", "approved_devices", approvedDeviceCount)
 			return nil
 		}
 		if !errors.Is(err, errXrayNeedsRestart) {
-			log.Printf("xray live user update failed, falling back to restart: %v", err)
+			slog.Warn("xray live user update failed, falling back to restart", "err", err)
 		}
 	}
 	if err := requestXrayRestart(cfg); err != nil {
@@ -72,7 +72,7 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 	if err := clearXrayRestartPending(cfg); err != nil {
 		return fmt.Errorf("clear xray restart pending: %w", err)
 	}
-	log.Printf("xray materialized approved_devices=%d and restart requested", approvedDeviceCount)
+	slog.Info("xray materialized and restart requested", "approved_devices", approvedDeviceCount)
 	return nil
 }
 

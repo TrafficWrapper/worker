@@ -35,3 +35,6 @@ build/update-release/
 .vscode/
 *.swp
 .DS_Store
+
+# Local go build output
+/agent/cmd/agent/agent

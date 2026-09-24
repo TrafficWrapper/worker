@@ -442,3 +442,22 @@ func TestWriteUpdateArtifactRequiresManifestHash(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOrchPostJSONDecodesStreamAndReportsHTTPErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fail" {
+			http.Error(w, "nope", http.StatusBadGateway)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"error":"x"}`)
+	}))
+	defer srv.Close()
+	client := &orchClient{cfg: envConfig{OrchURL: srv.URL}, http: srv.Client()}
+	var resp orchAckResponse
+	if err := client.postJSON("/ok", map[string]any{}, &resp); err != nil || !resp.OK || resp.Error != "x" {
+		t.Fatalf("resp=%+v err=%v", resp, err)
+	}
+	if err := client.postJSON("/fail", map[string]any{}, &resp); err == nil || !strings.Contains(err.Error(), "http 502") {
+		t.Fatalf("expected http error, got %v", err)
+	}
+}

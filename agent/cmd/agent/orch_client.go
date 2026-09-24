@@ -381,11 +381,20 @@ func (c *orchClient) postJSON(path string, req any, resp any) error {
 		return err
 	}
 	defer httpResp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxOrchResponseBytes))
 	if httpResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 4096))
 		return fmt.Errorf("http %d: %s", httpResp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return json.Unmarshal(body, resp)
+	// Decode straight from the stream: pull responses can carry an APK, and
+	// buffering the raw body first would hold one more full copy in memory.
+	limited := &io.LimitedReader{R: httpResp.Body, N: maxOrchResponseBytes + 1}
+	if err := json.NewDecoder(limited).Decode(resp); err != nil {
+		if limited.N <= 0 {
+			return fmt.Errorf("orchestrator response exceeds %d bytes", maxOrchResponseBytes)
+		}
+		return err
+	}
+	return nil
 }
 
 const maxOrchResponseBytes = 128 << 20

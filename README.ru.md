@@ -251,8 +251,8 @@ binaries:
 | `AWG_GATEWAY` | AWG gateway address внутри `AWG_SUBNET`. | Опц. | первый host subnet | `10.13.13.1`. |
 | `AWG_UAPI_SOCKET` | WireGuard/AmneziaWG UAPI socket path. | Опц. | `/var/run/wireguard/awg1.sock` | Обычно задаёт Compose. |
 | `AWG_SERVER_KEEPALIVE` | Политика server-side persistent keepalive для всех AWG peer. | Опц. | `0` | Runtime-откат: вернуть прежнее значение и перезапустить `agent` вместе с `awg-gw`. |
-| `XRAY_CONTAINER_NAME` | Docker container, через который agent обновляет пользователей Xray. Изменения устройств применяются на лету через Xray API; прочие изменения конфига перезапускают контейнер. Fallback-поиск ограничен compose-проектом агента. | Опц. | `worker-xray-1` | Compose задаёт стабильный `container_name` с этим значением; меняйте только вместе с именем xray service container. |
-| `DOCKER_SOCKET` | Docker socket path для agent. | Опц. | `/var/run/docker.sock` | Compose монтирует host Docker socket. |
+| `XRAY_API_SOCKET` | Unix-сокет Xray API, общий для agent и xray через том `xray-api`. Изменения устройств применяются через него на лету; при прочих изменениях конфига entrypoint xray перезапускает Xray. Доступа к Docker socket у агента нет. | Опц. | `/run/xray-api/api.sock` | Оставьте default Compose. |
+| `WORKER_VERSION` | Тег релиза готовых образов; пусто — локальная сборка. | Опц. | пусто | См. «Releases / prebuilt images». |
 | `LOG_LEVEL` | Уровень логов agent. | Опц. | `info` | `debug`, `info`, `warn` или `error`. |
 | `AWG_LOG_LEVEL` | Уровень логов `awg-gw` (AmneziaWG device). | Опц. | `error` | `verbose`, `error` или `silent`. |
 | `TW_METRICS_SCRUB_PEER_LABELS` | Заменяет public keys AWG peers в labels `/metrics` на salted hashes и убирает labels `allowed_ip`/`endpoint`. | Опц. | `0` | Ставьте `1`, если метрики уходят с хоста (удалённый Prometheus, общие дашборды). |
@@ -342,6 +342,50 @@ egress IP и `CAMOUFLAGE_DOMAIN`; `ORCH_*` и остальные настрой�
 git checkout <tag>
 docker compose up -d --build
 ```
+
+## Releases / prebuilt images
+
+Каждый тег `v*` собирается [`.github/workflows/release.yml`](.github/workflows/release.yml)
+в multi-arch (`linux/amd64`, `linux/arm64`) образы в GHCR, по одному на сервис:
+`ghcr.io/trafficwrapper/worker-<service>` для `agent`, `awg-gw`, `awg-smoke`,
+`distributor`, `xray` и `dns`. Каждый образ получает теги `v1.2.3`, `1.2.3`,
+`1.2` и `sha-<short>`, содержит SLSA provenance и SBOM и подписан cosign
+keyless (Sigstore, GitHub OIDC). После того как все образы опубликованы и
+подписаны, создаётся GitHub Release с автоматически сгенерированными notes.
+
+Запуск релиза без локальной сборки (переключитесь на тот же тег, чтобы
+`docker-compose.yml` и скрипты соответствовали образам):
+
+```sh
+git fetch --tags && git checkout v1.2.3
+# закрепите релиз в .env: WORKER_VERSION=v1.2.3
+WORKER_VERSION=v1.2.3 docker compose pull
+WORKER_VERSION=v1.2.3 docker compose up -d --no-build --wait
+```
+
+Без `WORKER_VERSION` compose использует тег `local`, и
+`docker compose up -d --build` собирает из исходников, как раньше.
+
+Откат на предыдущий тег (сначала сделайте бэкап, см. выше):
+
+```sh
+git checkout v1.2.2
+WORKER_VERSION=v1.2.2 docker compose pull
+WORKER_VERSION=v1.2.2 docker compose up -d --no-build --wait
+```
+
+Проверка подписи перед деплоем (нужен
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v2+):
+
+```sh
+cosign verify ghcr.io/trafficwrapper/worker-agent:v1.2.3 \
+  --certificate-identity-regexp 'https://github.com/TrafficWrapper/worker/.github/workflows/release.yml@refs/tags/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Повторите для каждого скачиваемого образа `worker-<service>`. Provenance и SBOM
+можно посмотреть через `docker buildx imagetools inspect <image> --format '{{ json .Provenance }}'`
+(или `.SBOM`).
 
 ## Локальная проверка сборки
 

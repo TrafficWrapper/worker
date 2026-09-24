@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,76 +71,42 @@ func TestDiffXrayUsersOnlyForClientListChanges(t *testing.T) {
 	}
 }
 
-type fakeDocker struct {
+type fakeXrayAPI struct {
 	mu        sync.Mutex
-	commands  [][]string
-	restarts  int
+	calls     [][]string
 	addOutput string
 }
 
-func startFakeDocker(t *testing.T, fd *fakeDocker) string {
+func installFakeXrayAPI(t *testing.T, fx *fakeXrayAPI) {
 	t.Helper()
-	socketPath := filepath.Join(t.TempDir(), "docker.sock")
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var lastCmd []string
-	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fd.mu.Lock()
-		defer fd.mu.Unlock()
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker-xray-1/exec":
-			var request struct {
-				Cmd []string `json:"Cmd"`
+	old := runXrayAPI
+	runXrayAPI = func(_ envConfig, _ time.Duration, subcommand string, args ...string) ([]byte, error) {
+		fx.mu.Lock()
+		defer fx.mu.Unlock()
+		fx.calls = append(fx.calls, append([]string{subcommand}, args...))
+		switch subcommand {
+		case "rmu":
+			return []byte("Removed 1 user(s) in total.\n"), nil
+		case "adu":
+			if fx.addOutput != "" {
+				return []byte(fx.addOutput), nil
 			}
-			_ = json.NewDecoder(r.Body).Decode(&request)
-			lastCmd = request.Cmd
-			fd.commands = append(fd.commands, request.Cmd)
-			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, `{"Id":"exec-1"}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/exec/exec-1/start":
-			out := ""
-			switch {
-			case containsString(lastCmd, "rmu"):
-				out = "Removed 1 user(s) in total.\n"
-			case containsString(lastCmd, "adu"):
-				out = fd.addOutput
-				if out == "" {
-					out = "Added 1 user(s) in total.\n"
-				}
-			}
-			_, _ = w.Write(dockerStreamFrame(1, []byte(out)))
-		case r.Method == http.MethodGet && r.URL.Path == "/exec/exec-1/json":
-			_, _ = io.WriteString(w, `{"Running":false,"ExitCode":0}`)
-		case r.Method == http.MethodPost && r.URL.Path == "/containers/worker-xray-1/restart":
-			fd.restarts++
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
+			return []byte("Added 1 user(s) in total.\n"), nil
 		}
-	})}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = server.Serve(ln)
-	}()
-	t.Cleanup(func() {
-		_ = server.Close()
-		<-done
-	})
-	return socketPath
+		return []byte(`{"stat":[]}`), nil
+	}
+	t.Cleanup(func() { runXrayAPI = old })
+}
+
+func restartRequested(cfg envConfig) bool {
+	_, err := os.Stat(filepath.Join(cfg.StateDir, "xray", "restart-request"))
+	return err == nil
 }
 
 func TestApplyXrayConfigUpdatesUsersWithoutRestart(t *testing.T) {
-	fd := &fakeDocker{}
-	cfg := envConfig{
-		StateDir:         t.TempDir(),
-		RealityDest:      "example.com:443",
-		CamouflageDomain: "example.com",
-		XrayContainer:    "worker-xray-1",
-		DockerSocket:     startFakeDocker(t, fd),
-	}
+	fx := &fakeXrayAPI{}
+	installFakeXrayAPI(t, fx)
+	cfg := envConfig{StateDir: t.TempDir(), RealityDest: "example.com:443", CamouflageDomain: "example.com"}
 	st := hardeningTestState()
 	a := realityDevice("device-a", "4fad2182-6de3-4407-bf8f-d8c688160ce6")
 	b := realityDevice("device-b", "4fad2182-6de3-4407-bf8f-d8c688160ce7")
@@ -153,11 +118,11 @@ func TestApplyXrayConfigUpdatesUsersWithoutRestart(t *testing.T) {
 	if err := applyXrayConfig(cfg, second, 1); err != nil {
 		t.Fatal(err)
 	}
-	if fd.restarts != 0 {
-		t.Fatalf("client-only change restarted xray %d times", fd.restarts)
+	if restartRequested(cfg) {
+		t.Fatal("client-only change requested an xray restart")
 	}
-	if len(fd.commands) != 2 || !containsString(fd.commands[0], "rmu") || !containsString(fd.commands[0], "device-a") || !containsString(fd.commands[1], "adu") {
-		t.Fatalf("unexpected docker exec commands: %v", fd.commands)
+	if len(fx.calls) != 2 || fx.calls[0][0] != "rmu" || !containsString(fx.calls[0], "device-a") || fx.calls[1][0] != "adu" {
+		t.Fatalf("unexpected xray api calls: %v", fx.calls)
 	}
 	if xrayRestartPending(cfg) {
 		t.Fatal("restart marker left after successful live update")
@@ -176,14 +141,8 @@ func TestApplyXrayConfigUpdatesUsersWithoutRestart(t *testing.T) {
 }
 
 func TestApplyXrayConfigFallsBackToRestartWhenLiveUpdateFails(t *testing.T) {
-	fd := &fakeDocker{addOutput: "failed to add user\nAdded 0 user(s) in total.\n"}
-	cfg := envConfig{
-		StateDir:         t.TempDir(),
-		RealityDest:      "example.com:443",
-		CamouflageDomain: "example.com",
-		XrayContainer:    "worker-xray-1",
-		DockerSocket:     startFakeDocker(t, fd),
-	}
+	installFakeXrayAPI(t, &fakeXrayAPI{addOutput: "failed to add user\nAdded 0 user(s) in total.\n"})
+	cfg := envConfig{StateDir: t.TempDir(), RealityDest: "example.com:443", CamouflageDomain: "example.com"}
 	st := hardeningTestState()
 	first, _ := xrayConfigBytes(cfg, st, nil)
 	if err := writeXrayConfigBytes(cfg, first); err != nil {
@@ -193,11 +152,23 @@ func TestApplyXrayConfigFallsBackToRestartWhenLiveUpdateFails(t *testing.T) {
 	if err := applyXrayConfig(cfg, second, 1); err != nil {
 		t.Fatal(err)
 	}
-	if fd.restarts != 1 {
-		t.Fatalf("failed live update must fall back to one restart, got %d", fd.restarts)
+	if !restartRequested(cfg) {
+		t.Fatal("failed live update must request a restart")
 	}
 	if xrayRestartPending(cfg) {
-		t.Fatal("restart marker left after restart")
+		t.Fatal("restart marker left after restart request")
+	}
+}
+
+func TestXrayAPIListensOnlyOnUnixSocket(t *testing.T) {
+	doc := xrayConfigDocument(envConfig{XrayAPISocket: "/run/xray-api/api.sock"}, hardeningTestState(), nil)
+	inbounds := doc["inbounds"].([]any)
+	api := inbounds[len(inbounds)-1].(map[string]any)
+	if api["listen"] != "/run/xray-api/api.sock" || api["port"] != nil {
+		t.Fatalf("api inbound must use the unix socket only: %#v", api)
+	}
+	if api["settings"].(map[string]any)["network"] != "unix" {
+		t.Fatalf("api inbound network: %#v", api["settings"])
 	}
 }
 

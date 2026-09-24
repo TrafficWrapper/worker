@@ -43,6 +43,7 @@ const (
 	distributorTLS        = 9443
 	distributorTW         = 8080
 	telemetryMaxBodyBytes = 64 << 10
+	defaultXrayAPISocket  = "/run/xray-api/api.sock"
 )
 
 type stateFile struct {
@@ -89,8 +90,8 @@ type envConfig struct {
 	AWGProfiles            []awgInboundProfile
 	MetricsScrubPeerLabels bool
 	MetricsScrubSalt       string
-	XrayContainer          string
-	DockerSocket           string
+	XrayAPISocket          string
+	XrayBinary             string
 	OrchURL                string
 	OrchStaticPublic       string
 	OrchInsecureTLS        bool
@@ -378,8 +379,8 @@ func readEnv() (envConfig, error) {
 		AWGUAPISocket:          getenv("AWG_UAPI_SOCKET", "/var/run/wireguard/awg1.sock"),
 		AWGServerKeepalive:     serverKeepalive,
 		MetricsScrubPeerLabels: getenv("TW_METRICS_SCRUB_PEER_LABELS", "0") == "1",
-		XrayContainer:          os.Getenv("XRAY_CONTAINER_NAME"),
-		DockerSocket:           getenv("DOCKER_SOCKET", "/var/run/docker.sock"),
+		XrayAPISocket:          getenv("XRAY_API_SOCKET", defaultXrayAPISocket),
+		XrayBinary:             getenv("XRAY_BINARY", "/usr/local/bin/xray"),
 		OrchURL:                os.Getenv("ORCH_URL"),
 		OrchStaticPublic:       os.Getenv("ORCH_STATIC_PUBLIC_KEY"),
 		OrchInsecureTLS:        getenv("ORCH_INSECURE_TLS", "0") == "1",
@@ -965,12 +966,17 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		}
 		inbounds = append(inbounds, inbound)
 	}
+	// The API listens only on a unix socket in a volume shared with the
+	// agent, so it is unreachable over the network, including by clients.
+	apiSocket := cfg.XrayAPISocket
+	if apiSocket == "" {
+		apiSocket = defaultXrayAPISocket
+	}
 	apiInbound := map[string]any{
 		"tag":      "api",
-		"listen":   "127.0.0.1",
-		"port":     xrayAPIInPort,
+		"listen":   apiSocket,
 		"protocol": "dokodemo-door",
-		"settings": map[string]any{"address": "127.0.0.1"},
+		"settings": map[string]any{"address": "127.0.0.1", "port": xrayAPIInPort, "network": "unix"},
 	}
 	xcfg := map[string]any{
 		"log":      map[string]any{"loglevel": "info"},

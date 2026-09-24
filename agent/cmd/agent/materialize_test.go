@@ -888,8 +888,8 @@ func TestXrayConfigEnablesLoopbackUserStats(t *testing.T) {
 		t.Fatalf("device stats identity missing: %#v", deviceClient)
 	}
 	apiInbound := inbounds[1].(map[string]any)
-	if apiInbound["tag"] != "api" || apiInbound["listen"] != "127.0.0.1" || apiInbound["port"] != xrayAPIInPort {
-		t.Fatalf("api inbound is not loopback-only: %#v", apiInbound)
+	if apiInbound["tag"] != "api" || apiInbound["listen"] != defaultXrayAPISocket || apiInbound["port"] != nil {
+		t.Fatalf("api inbound must listen only on the unix socket: %#v", apiInbound)
 	}
 	api := doc["api"].(map[string]any)
 	services := api["services"].([]string)
@@ -958,63 +958,16 @@ func TestExpiredApprovedDeviceSkippedFromMaterialization(t *testing.T) {
 	}
 }
 
-func TestMaterializeDoesNotWriteXrayConfigWithoutRestartTarget(t *testing.T) {
-	cfg := envConfig{StateDir: t.TempDir(), RealityDest: "awg-gw:9443", CamouflageDomain: "example.com"}
-	st := stateFile{
-		SmokeRealityUUID: "14526b0e-6de3-4407-bf8f-d8c688160ce6",
-		Reality:          realityState{PrivateKey: "priv", ShortID: "abcd", PublicKey: "pub"},
-		AWG: awgState{
-			SmokePublic:   keyB64(1),
-			SmokePSK:      keyB64(2),
-			SmokeIP:       "10.13.13.2/32",
-			PublicKey:     keyB64(3),
-			PrivateKey:    keyB64(4),
-			PrivateKeyHex: strings.Repeat("0", 64),
-		},
-	}
-	if _, err := writeXrayConfig(cfg, st, nil); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(xrayConfigPath(cfg))
-	if err != nil {
-		t.Fatal(err)
-	}
-	config := `{"desired_state":{"approved_devices":[{"device_id":"device-a","reality_uuid":"4fad2182-6de3-4407-bf8f-d8c688160ce6","awg_public_key":"` + keyB64(5) + `","internal_ip":"10.13.13.10/32","psk2":"` + keyB64(6) + `","status":"approved"}]}}`
-	err = materializeApprovedDevices(cfg, st, config)
-	if err == nil || !strings.Contains(err.Error(), "XRAY_CONTAINER_NAME") {
-		t.Fatalf("expected missing xray container error, got %v", err)
-	}
-	after, err := os.ReadFile(xrayConfigPath(cfg))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != string(before) {
-		t.Fatalf("xray config changed before restart target was available:\n%s", after)
-	}
-	if xrayRestartPending(cfg) {
-		t.Fatal("restart pending marker should not be written before config write")
-	}
-}
-
-func TestRenderXrayMarksPendingWhenStartupRestartFails(t *testing.T) {
+func TestRenderXrayRequestsRestartOnStartupChange(t *testing.T) {
+	installFakeXrayAPI(t, &fakeXrayAPI{})
 	cfg := envConfig{
 		StateDir:         t.TempDir(),
 		RealityDest:      "awg-gw:9443",
 		CamouflageDomain: "example.com",
-		XrayContainer:    "worker-xray-1",
-		DockerSocket:     filepath.Join(t.TempDir(), "docker.sock"),
 	}
 	st := stateFile{
 		SmokeRealityUUID: "14526b0e-6de3-4407-bf8f-d8c688160ce6",
 		Reality:          realityState{PrivateKey: "priv", ShortID: "abcd", PublicKey: "pub"},
-		AWG: awgState{
-			SmokePublic:   keyB64(1),
-			SmokePSK:      keyB64(2),
-			SmokeIP:       "10.13.13.2/32",
-			PublicKey:     keyB64(3),
-			PrivateKey:    keyB64(4),
-			PrivateKeyHex: strings.Repeat("0", 64),
-		},
 	}
 	config := `{"desired_state":{"approved_devices":[{"device_id":"device-a","reality_uuid":"4fad2182-6de3-4407-bf8f-d8c688160ce6","awg_public_key":"` + keyB64(5) + `","internal_ip":"10.13.13.10/32","psk2":"` + keyB64(6) + `","status":"approved"}]}}`
 	if err := os.MkdirAll(filepath.Join(cfg.StateDir, "orch"), 0o755); err != nil {
@@ -1023,12 +976,11 @@ func TestRenderXrayMarksPendingWhenStartupRestartFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfg.StateDir, "orch", "worker-config.json"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := renderXray(cfg, st)
-	if err == nil || !strings.Contains(err.Error(), "restart xray container") {
-		t.Fatalf("expected startup restart error, got %v", err)
+	if err := renderXray(cfg, st); err != nil {
+		t.Fatal(err)
 	}
-	if !xrayRestartPending(cfg) {
-		t.Fatal("startup restart failure did not leave pending marker")
+	if !restartRequested(cfg) || xrayRestartPending(cfg) {
+		t.Fatal("startup config change must request a restart and clear the marker")
 	}
 	xrayRaw, err := os.ReadFile(xrayConfigPath(cfg))
 	if err != nil {
@@ -1123,23 +1075,6 @@ func TestDistributedAPKInfoPrefersUpdateManifestOverStaleVersion(t *testing.T) {
 	apk := distributedAPKInfo(stateDir)
 	if apk["version_code"] != int64(13) || apk["version_name"] != "0.1.12" || apk["apk_sha256"] != strings.Repeat("b", 64) {
 		t.Fatalf("distributed apk should come from update-manifest.json, got %#v", apk)
-	}
-}
-
-func TestDockerContainerNameCandidatesBridgeComposeV1V2(t *testing.T) {
-	got := dockerContainerNameCandidates("worker_xray_1")
-	want := []string{"worker_xray_1", "worker-xray-1"}
-	for _, value := range want {
-		if !containsString(got, value) {
-			t.Fatalf("candidate %q missing from %#v", value, got)
-		}
-	}
-	got = dockerContainerNameCandidates("worker-xray-1")
-	want = []string{"worker-xray-1", "worker_xray_1"}
-	for _, value := range want {
-		if !containsString(got, value) {
-			t.Fatalf("candidate %q missing from %#v", value, got)
-		}
 	}
 }
 

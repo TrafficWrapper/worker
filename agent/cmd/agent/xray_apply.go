@@ -24,6 +24,13 @@ var (
 	xrayRemovedUsersRe  = regexp.MustCompile(`Removed (\d+) user\(s\) in total`)
 )
 
+// requestXrayRestart asks the Xray container's entrypoint to restart Xray by
+// changing the restart-request file it watches; the agent needs no Docker
+// socket for this.
+func requestXrayRestart(cfg envConfig) error {
+	return writeFile(filepath.Join(cfg.StateDir, "xray", "restart-request"), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o644)
+}
+
 // applyXrayConfig writes the rendered Xray config and makes the running Xray
 // pick it up. Changes that only touch the REALITY client list are applied live
 // through the Xray HandlerService so active sessions survive; anything else, or
@@ -34,10 +41,6 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 	restartPending := xrayRestartPending(cfg)
 	if !xrayChanged && !restartPending {
 		return nil
-	}
-	if cfg.XrayContainer == "" {
-		recordXrayApply("failed")
-		return errors.New("xray config changed but XRAY_CONTAINER_NAME is not configured")
 	}
 	if xrayChanged {
 		if err := markXrayRestartPending(cfg); err != nil {
@@ -61,16 +64,15 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 			log.Printf("xray live user update failed, falling back to restart: %v", err)
 		}
 	}
-	log.Printf("xray config changed; restarting container %s via %s", cfg.XrayContainer, cfg.DockerSocket)
-	if err := restartDockerContainer(cfg.DockerSocket, cfg.XrayContainer); err != nil {
+	if err := requestXrayRestart(cfg); err != nil {
 		recordXrayApply("failed")
-		return fmt.Errorf("restart xray container %s: %w", cfg.XrayContainer, err)
+		return fmt.Errorf("request xray restart: %w", err)
 	}
 	recordXrayApply("restart")
 	if err := clearXrayRestartPending(cfg); err != nil {
 		return fmt.Errorf("clear xray restart pending: %w", err)
 	}
-	log.Printf("xray materialized approved_devices=%d and restarted %s", approvedDeviceCount, cfg.XrayContainer)
+	log.Printf("xray materialized approved_devices=%d and restart requested", approvedDeviceCount)
 	return nil
 }
 
@@ -95,12 +97,7 @@ func hotApplyXrayUsers(cfg envConfig, oldRaw, newRaw []byte) error {
 
 func applyXrayUserDiff(cfg envConfig, diff xrayUserDiff) error {
 	if len(diff.Remove) > 0 {
-		command := append([]string{
-			"/usr/local/bin/xray", "api", "rmu",
-			fmt.Sprintf("--server=127.0.0.1:%d", xrayAPIInPort),
-			"-tag=" + diff.Tag,
-		}, diff.Remove...)
-		out, err := execInXrayContainer(cfg, command, xrayUserAPITimeout)
+		out, err := runXrayAPI(cfg, xrayUserAPITimeout, "rmu", append([]string{"-tag=" + diff.Tag}, diff.Remove...)...)
 		if err != nil {
 			return fmt.Errorf("xray rmu: %w", err)
 		}
@@ -109,19 +106,12 @@ func applyXrayUserDiff(cfg envConfig, diff xrayUserDiff) error {
 		}
 	}
 	if len(diff.Add) > 0 {
-		// The Xray container mounts the same worker-state directory at the same
-		// path, so the request file is readable from inside it.
 		path := filepath.Join(cfg.StateDir, "xray", "users-add.json")
 		if err := writeJSONFile(path, xrayUserAddDocument(diff.Tag, diff.Add), 0o600); err != nil {
 			return err
 		}
 		defer os.Remove(path)
-		command := []string{
-			"/usr/local/bin/xray", "api", "adu",
-			fmt.Sprintf("--server=127.0.0.1:%d", xrayAPIInPort),
-			path,
-		}
-		out, err := execInXrayContainer(cfg, command, xrayUserAPITimeout)
+		out, err := runXrayAPI(cfg, xrayUserAPITimeout, "adu", path)
 		if err != nil {
 			return fmt.Errorf("xray adu: %w", err)
 		}

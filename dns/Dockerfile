@@ -1,10 +1,9 @@
 # syntax=docker/dockerfile:1
-FROM --platform=$BUILDPLATFORM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS build
 
 ARG TARGETOS
 ARG TARGETARCH
-# v0.76.0 is the newest release that builds with Go 1.24.
-ARG DNSPROXY_VERSION=v0.76.0
+ARG DNSPROXY_VERSION=v0.85.0
 
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \

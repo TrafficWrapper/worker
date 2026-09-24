@@ -1,12 +1,12 @@
 module github.com/TrafficWrapper/worker/core
 
-go 1.24
+go 1.26.0
 
 require (
 	github.com/amnezia-vpn/amneziawg-go v0.2.13-0.20250623202557-6a7c878409f3 // pinned commit 6a7c878409f32dc39a82bc597766c81304ab9840
-	golang.org/x/crypto v0.38.0
-	golang.org/x/net v0.40.0
-	golang.org/x/sys v0.33.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/net v0.58.0
+	golang.org/x/sys v0.48.0
 )
 
 require (

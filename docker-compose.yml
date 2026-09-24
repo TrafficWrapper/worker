@@ -108,6 +108,32 @@ services:
       retries: 6
       start_period: 90s
 
+  dns:
+    <<: *defaults
+    profiles: ["dns"]
+    build:
+      context: dns
+    depends_on:
+      awg-gw:
+        condition: service_healthy
+    network_mode: "service:awg-gw"
+    environment:
+      DNS_UPSTREAMS: ${DNS_UPSTREAMS:-https://dns.quad9.net/dns-query https://cloudflare-dns.com/dns-query}
+      DNS_BOOTSTRAP: ${DNS_BOOTSTRAP:-9.9.9.9:53}
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    mem_limit: 128m
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "nslookup", "localhost", "127.0.0.1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
   xray:
     <<: *defaults
     container_name: ${XRAY_CONTAINER_NAME:-worker-xray-1}

@@ -64,10 +64,12 @@ type registryFile struct {
 }
 
 type registryClient struct {
-	WGPublicKey string    `json:"wg_public_key"`
-	InternalIP  string    `json:"internal_ip"`
-	PSK2        string    `json:"psk2"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	WGPublicKey  string    `json:"wg_public_key"`
+	InternalIP   string    `json:"internal_ip"`
+	PSK2         string    `json:"psk2"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	DownloadMbps int       `json:"download_mbps,omitempty"`
+	UploadMbps   int       `json:"upload_mbps,omitempty"`
 }
 
 type restoredPeer struct {
@@ -212,6 +214,8 @@ func runGateway(path string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	go runRateLimits(ctx, cfg.Interface, cfg.PeerRegistry)
 
 	fmt.Println("status=awg-gw running; UAPI socket ready")
 	select {

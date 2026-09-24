@@ -94,7 +94,7 @@ jobs:
       - name: Validate compose file
         run: |
           cp .env.example .env
-          docker compose --profile smoke config --quiet
+          docker compose --profile smoke --profile dns config --quiet
 
       - name: Build images
-        run: docker compose --profile smoke build
+        run: docker compose --profile smoke --profile dns build

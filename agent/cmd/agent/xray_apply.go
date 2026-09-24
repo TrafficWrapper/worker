@@ -15,8 +15,7 @@ import (
 )
 
 const (
-	xrayRealityInboundTag = "reality-in"
-	xrayUserAPITimeout    = 15 * time.Second
+	xrayUserAPITimeout = 15 * time.Second
 )
 
 var (
@@ -76,20 +75,30 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 }
 
 type xrayUserDiff struct {
+	Tag    string
 	Remove []string
 	Add    []map[string]any
 }
 
 func hotApplyXrayUsers(cfg envConfig, oldRaw, newRaw []byte) error {
-	diff, err := diffXrayUsers(oldRaw, newRaw)
+	diffs, err := diffXrayUsers(oldRaw, newRaw)
 	if err != nil {
 		return err
 	}
+	for _, diff := range diffs {
+		if err := applyXrayUserDiff(cfg, diff); err != nil {
+			return fmt.Errorf("%s: %w", diff.Tag, err)
+		}
+	}
+	return nil
+}
+
+func applyXrayUserDiff(cfg envConfig, diff xrayUserDiff) error {
 	if len(diff.Remove) > 0 {
 		command := append([]string{
 			"/usr/local/bin/xray", "api", "rmu",
 			fmt.Sprintf("--server=127.0.0.1:%d", xrayAPIInPort),
-			"-tag=" + xrayRealityInboundTag,
+			"-tag=" + diff.Tag,
 		}, diff.Remove...)
 		out, err := execInXrayContainer(cfg, command, xrayUserAPITimeout)
 		if err != nil {
@@ -103,7 +112,7 @@ func hotApplyXrayUsers(cfg envConfig, oldRaw, newRaw []byte) error {
 		// The Xray container mounts the same worker-state directory at the same
 		// path, so the request file is readable from inside it.
 		path := filepath.Join(cfg.StateDir, "xray", "users-add.json")
-		if err := writeJSONFile(path, xrayUserAddDocument(diff.Add), 0o600); err != nil {
+		if err := writeJSONFile(path, xrayUserAddDocument(diff.Tag, diff.Add), 0o600); err != nil {
 			return err
 		}
 		defer os.Remove(path)
@@ -138,7 +147,7 @@ func expectXrayUserCount(re *regexp.Regexp, out []byte, want int) error {
 	return nil
 }
 
-func xrayUserAddDocument(clients []map[string]any) map[string]any {
+func xrayUserAddDocument(tag string, clients []map[string]any) map[string]any {
 	items := make([]any, 0, len(clients))
 	for _, client := range clients {
 		items = append(items, client)
@@ -147,7 +156,7 @@ func xrayUserAddDocument(clients []map[string]any) map[string]any {
 		// Xray builds (but does not bind) this inbound to extract the users, and
 		// its builder requires a port.
 		"inbounds": []any{map[string]any{
-			"tag":      xrayRealityInboundTag,
+			"tag":      tag,
 			"port":     xrayInPort,
 			"protocol": "vless",
 			"settings": map[string]any{
@@ -160,85 +169,98 @@ func xrayUserAddDocument(clients []map[string]any) map[string]any {
 
 // diffXrayUsers returns errXrayNeedsRestart unless the old config is known to
 // have the HandlerService enabled and the two configs differ only in the
-// REALITY inbound client list.
-func diffXrayUsers(oldRaw, newRaw []byte) (xrayUserDiff, error) {
+// REALITY inbound client lists.
+func diffXrayUsers(oldRaw, newRaw []byte) ([]xrayUserDiff, error) {
 	if len(oldRaw) == 0 {
-		return xrayUserDiff{}, errXrayNeedsRestart
+		return nil, errXrayNeedsRestart
 	}
 	oldDoc, oldClients, err := splitXrayClients(oldRaw)
 	if err != nil {
-		return xrayUserDiff{}, errXrayNeedsRestart
+		return nil, errXrayNeedsRestart
 	}
 	newDoc, newClients, err := splitXrayClients(newRaw)
 	if err != nil {
-		return xrayUserDiff{}, err
+		return nil, err
 	}
 	if !xrayHandlerServiceEnabled(oldDoc) || string(oldDoc) != string(newDoc) {
-		return xrayUserDiff{}, errXrayNeedsRestart
+		return nil, errXrayNeedsRestart
 	}
-	var diff xrayUserDiff
-	for email, oldClient := range oldClients {
-		newClient, ok := newClients[email]
-		if !ok || !sameJSON(oldClient, newClient) {
-			diff.Remove = append(diff.Remove, email)
+	tags := make([]string, 0, len(newClients))
+	for tag := range newClients {
+		tags = append(tags, tag)
+	}
+	sort.Strings(tags)
+	var diffs []xrayUserDiff
+	for _, tag := range tags {
+		diff := xrayUserDiff{Tag: tag}
+		before, after := oldClients[tag], newClients[tag]
+		for email, oldClient := range before {
+			newClient, ok := after[email]
+			if !ok || !sameJSON(oldClient, newClient) {
+				diff.Remove = append(diff.Remove, email)
+			}
 		}
-	}
-	for email, newClient := range newClients {
-		oldClient, ok := oldClients[email]
-		if !ok || !sameJSON(oldClient, newClient) {
-			diff.Add = append(diff.Add, newClient)
+		for email, newClient := range after {
+			oldClient, ok := before[email]
+			if !ok || !sameJSON(oldClient, newClient) {
+				diff.Add = append(diff.Add, newClient)
+			}
 		}
+		if len(diff.Remove) == 0 && len(diff.Add) == 0 {
+			continue
+		}
+		sort.Strings(diff.Remove)
+		sort.Slice(diff.Add, func(i, j int) bool {
+			return fmt.Sprint(diff.Add[i]["email"]) < fmt.Sprint(diff.Add[j]["email"])
+		})
+		diffs = append(diffs, diff)
 	}
-	sort.Strings(diff.Remove)
-	sort.Slice(diff.Add, func(i, j int) bool {
-		return fmt.Sprint(diff.Add[i]["email"]) < fmt.Sprint(diff.Add[j]["email"])
-	})
-	return diff, nil
+	return diffs, nil
 }
 
-// splitXrayClients returns the config with the REALITY client list blanked out,
-// in canonical JSON form, plus the clients keyed by email.
-func splitXrayClients(raw []byte) ([]byte, map[string]map[string]any, error) {
+// splitXrayClients returns the config with every REALITY client list blanked
+// out, in canonical JSON form, plus the clients keyed by inbound tag and email.
+func splitXrayClients(raw []byte) ([]byte, map[string]map[string]map[string]any, error) {
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, nil, err
 	}
 	inbounds, _ := doc["inbounds"].([]any)
-	var clients []any
-	found := false
+	byTag := map[string]map[string]map[string]any{}
 	for _, item := range inbounds {
 		inbound, _ := item.(map[string]any)
-		if inbound == nil || inbound["tag"] != xrayRealityInboundTag {
+		tag, _ := inbound["tag"].(string)
+		if inbound == nil || !strings.HasPrefix(tag, realityTagPrefix) {
 			continue
 		}
 		settings, _ := inbound["settings"].(map[string]any)
 		if settings == nil {
 			return nil, nil, errors.New("reality inbound has no settings")
 		}
-		clients, _ = settings["clients"].([]any)
+		clients, _ := settings["clients"].([]any)
 		settings["clients"] = nil
-		found = true
+		byEmail := make(map[string]map[string]any, len(clients))
+		for _, item := range clients {
+			client, _ := item.(map[string]any)
+			email, _ := client["email"].(string)
+			if client == nil || email == "" {
+				return nil, nil, errors.New("xray client without email")
+			}
+			if _, dup := byEmail[email]; dup {
+				return nil, nil, fmt.Errorf("duplicate xray client email %q", email)
+			}
+			byEmail[email] = client
+		}
+		byTag[tag] = byEmail
 	}
-	if !found {
+	if _, ok := byTag[realityBaseInboundTag]; !ok {
 		return nil, nil, errors.New("reality inbound not found")
-	}
-	byEmail := make(map[string]map[string]any, len(clients))
-	for _, item := range clients {
-		client, _ := item.(map[string]any)
-		email, _ := client["email"].(string)
-		if client == nil || email == "" {
-			return nil, nil, errors.New("xray client without email")
-		}
-		if _, dup := byEmail[email]; dup {
-			return nil, nil, fmt.Errorf("duplicate xray client email %q", email)
-		}
-		byEmail[email] = client
 	}
 	canonical, err := json.Marshal(doc)
 	if err != nil {
 		return nil, nil, err
 	}
-	return canonical, byEmail, nil
+	return canonical, byTag, nil
 }
 
 func xrayHandlerServiceEnabled(canonical []byte) bool {

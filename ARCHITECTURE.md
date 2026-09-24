@@ -23,3 +23,16 @@ This repository implements the data plane:
 
 The worker is an exit/decryption point. Only use workers that the deployment
 owner trusts operationally.
+
+## REALITY profiles, Vision and short ID cohorts
+
+- `reality_profiles` in self-describe lists every REALITY inbound (the base one
+  plus `REALITY_INBOUNDS`), with its network and the flows it accepts.
+- Vision (`xtls-rprx-vision`) is enabled per device through `reality_flow` in
+  the signed worker config. Xray rejects a client whose flow differs from its
+  account, so the orchestrator must set it only for clients that use Vision.
+  XHTTP profiles never carry a flow.
+- Each worker has 16 cohort short IDs (`reality.cohort_short_ids`). The
+  orchestrator assigns a device to a cohort; listing a short ID in
+  `desired_state.revoked_short_ids` stops accepting it, so a leaked cohort
+  can be cut off without rotating the worker key.

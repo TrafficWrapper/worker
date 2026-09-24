@@ -39,10 +39,14 @@ func TestDiffXrayUsersOnlyForClientListChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	diff, err := diffXrayUsers(oldRaw, newRaw)
+	diffs, err := diffXrayUsers(oldRaw, newRaw)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(diffs) != 1 || diffs[0].Tag != "reality-in" {
+		t.Fatalf("diffs=%+v", diffs)
+	}
+	diff := diffs[0]
 	if strings.Join(diff.Remove, ",") != "device-a,device-b" {
 		t.Fatalf("remove=%v", diff.Remove)
 	}
@@ -165,7 +169,7 @@ func TestApplyXrayConfigUpdatesUsersWithoutRestart(t *testing.T) {
 	if string(raw) != string(second) {
 		t.Fatal("xray config on disk not updated")
 	}
-	addDoc, _ := json.Marshal(xrayUserAddDocument([]map[string]any{{"id": b.RealityUUID, "email": b.DeviceID}}))
+	addDoc, _ := json.Marshal(xrayUserAddDocument("reality-in", []map[string]any{{"id": b.RealityUUID, "email": b.DeviceID}}))
 	if !strings.Contains(string(addDoc), `"port":8443`) || !strings.Contains(string(addDoc), `"tag":"reality-in"`) {
 		t.Fatalf("adu document is not buildable by xray: %s", addDoc)
 	}

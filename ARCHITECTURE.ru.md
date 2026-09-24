@@ -23,3 +23,16 @@
 
 Worker является exit/decryption point. Используйте только workers, которым
 deployment owner операционно доверяет.
+
+## REALITY-профили, Vision и когорты shortId
+
+- `reality_profiles` в self-describe перечисляет все REALITY-inbound'ы
+  (базовый и из `REALITY_INBOUNDS`) с сетью и допустимыми flow.
+- Vision (`xtls-rprx-vision`) включается для каждого устройства через
+  `reality_flow` в подписанном worker config. Xray отвергает клиента, чей flow
+  не совпадает с аккаунтом, поэтому оркестратор выставляет его только клиентам
+  с поддержкой Vision. У XHTTP-профилей flow не бывает.
+- У воркера 16 когортных shortId (`reality.cohort_short_ids`). Оркестратор
+  закрепляет устройство за когортой; shortId из
+  `desired_state.revoked_short_ids` перестаёт приниматься, так что утёкшую
+  когорту можно отрезать без смены ключа воркера.

@@ -59,9 +59,10 @@ type stateFile struct {
 }
 
 type realityState struct {
-	PrivateKey string `json:"private_key"`
-	PublicKey  string `json:"public_key"`
-	ShortID    string `json:"short_id"`
+	PrivateKey     string   `json:"private_key"`
+	PublicKey      string   `json:"public_key"`
+	ShortID        string   `json:"short_id"`
+	CohortShortIDs []string `json:"cohort_short_ids,omitempty"`
 }
 
 type awgState struct {
@@ -107,6 +108,7 @@ type envConfig struct {
 	AllowPrivateEgress     bool
 	OrchAckInterval        time.Duration
 	RealityProbeAddr       string
+	RealityProfiles        []realityProfile
 	BlockSMTP              bool
 	BlockBitTorrent        bool
 }
@@ -402,6 +404,9 @@ func readEnv() (envConfig, error) {
 	}
 	cfg.AllowPrivateEgress = getenv("WORKER_ALLOW_PRIVATE_EGRESS", "0") == "1"
 	cfg.RealityProbeAddr = getenv("REALITY_PROBE_ADDR", defaultRealityAddr)
+	if cfg.RealityProfiles, err = parseRealityProfiles(os.Getenv("REALITY_INBOUNDS")); err != nil {
+		return envConfig{}, err
+	}
 	cfg.BlockSMTP = getenv("WORKER_BLOCK_SMTP", "1") == "1"
 	cfg.BlockBitTorrent = getenv("WORKER_BLOCK_BITTORRENT", "1") == "1"
 	ackInterval, err := time.ParseDuration(getenv("ORCH_ACK_INTERVAL", "90s"))
@@ -679,6 +684,11 @@ func bootstrap(cfg envConfig) (stateFile, error) {
 		if err != nil {
 			return stateFile{}, err
 		}
+		if ensureRealityCohorts(&st) {
+			if err := writeJSONFile(path, st, 0o600); err != nil {
+				return stateFile{}, err
+			}
+		}
 		if err := renderAll(cfg, st); err != nil {
 			return stateFile{}, err
 		}
@@ -748,6 +758,7 @@ func bootstrap(cfg envConfig) (stateFile, error) {
 		EnrollTokenHash:  enrollHash,
 		SmokeRealityUUID: uuidV4(),
 	}
+	ensureRealityCohorts(&st)
 	raw, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return stateFile{}, err
@@ -848,15 +859,14 @@ func renderXray(cfg envConfig, st stateFile) error {
 }
 
 func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) map[string]any {
-	clients := []any{}
+	type realityClient struct {
+		id, email, flow string
+	}
+	clients := []realityClient{}
 	seen := map[string]struct{}{}
 	seenEmails := map[string]struct{}{}
 	if !cfg.DisableSmokePeers {
-		clients = append(clients, map[string]any{
-			"id":    st.SmokeRealityUUID,
-			"email": "p0-smoke",
-			"level": 0,
-		})
+		clients = append(clients, realityClient{id: st.SmokeRealityUUID, email: "p0-smoke"})
 		seen[st.SmokeRealityUUID] = struct{}{}
 		seenEmails["p0-smoke"] = struct{}{}
 	}
@@ -879,46 +889,62 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		}
 		seen[device.RealityUUID] = struct{}{}
 		seenEmails[email] = struct{}{}
-		clients = append(clients, map[string]any{
-			"id":    device.RealityUUID,
-			"email": email,
-			"level": 0,
-		})
+		clients = append(clients, realityClient{id: device.RealityUUID, email: email, flow: device.RealityFlow})
 	}
-	streamSettings := map[string]any{
-		"network":  realityNetwork(cfg),
-		"security": "reality",
-		"realitySettings": map[string]any{
-			"show":        false,
-			"dest":        cfg.RealityDest,
-			"xver":        0,
-			"serverNames": []string{cfg.CamouflageDomain},
-			"privateKey":  st.Reality.PrivateKey,
-			"shortIds":    []string{st.Reality.ShortID},
-		},
-	}
-	if xhttp := xhttpSettings(cfg); xhttp != nil {
-		streamSettings["xhttpSettings"] = xhttp
-	}
-	realityInbound := map[string]any{
-		"tag":      "reality-in",
-		"listen":   "0.0.0.0",
-		"port":     xrayInPort,
-		"protocol": "vless",
-		"settings": map[string]any{
-			"decryption": "none",
-			"clients":    clients,
-		},
-		"streamSettings": streamSettings,
-	}
-	if cfg.BlockBitTorrent {
-		// Protocol-based routing needs sniffing; routeOnly keeps the client's
-		// requested destination untouched.
-		realityInbound["sniffing"] = map[string]any{
-			"enabled":      true,
-			"destOverride": []string{"http", "tls", "quic"},
-			"routeOnly":    true,
+	shortIDs := realityShortIDs(st, revokedShortIDs(cfg.StateDir))
+	inbounds := []any{}
+	for _, profile := range realityProfiles(cfg) {
+		profileClients := make([]any, 0, len(clients))
+		for _, client := range clients {
+			entry := map[string]any{"id": client.id, "email": client.email, "level": 0}
+			// Vision is per device: the server rejects a client whose flow
+			// differs from its account, so the orchestrator enables it only
+			// for clients that support it. XHTTP does not carry XTLS.
+			if client.flow != "" && profile.supportsVision() {
+				entry["flow"] = client.flow
+			}
+			profileClients = append(profileClients, entry)
 		}
+		streamSettings := map[string]any{
+			"network":  profile.Network,
+			"security": "reality",
+			"realitySettings": map[string]any{
+				"show":        false,
+				"dest":        cfg.RealityDest,
+				"xver":        0,
+				"serverNames": []string{cfg.CamouflageDomain},
+				"privateKey":  st.Reality.PrivateKey,
+				"shortIds":    shortIDs,
+			},
+		}
+		if profile.Network == "xhttp" {
+			settings := realityXHTTPSettings(profile)
+			if profile.Name == realityBaseProfileName {
+				settings = xhttpSettings(cfg)
+			}
+			streamSettings["xhttpSettings"] = settings
+		}
+		inbound := map[string]any{
+			"tag":      profile.tag(),
+			"listen":   "0.0.0.0",
+			"port":     profile.ListenPort,
+			"protocol": "vless",
+			"settings": map[string]any{
+				"decryption": "none",
+				"clients":    profileClients,
+			},
+			"streamSettings": streamSettings,
+		}
+		if cfg.BlockBitTorrent {
+			// Protocol-based routing needs sniffing; routeOnly keeps the
+			// client's requested destination untouched.
+			inbound["sniffing"] = map[string]any{
+				"enabled":      true,
+				"destOverride": []string{"http", "tls", "quic"},
+				"routeOnly":    true,
+			}
+		}
+		inbounds = append(inbounds, inbound)
 	}
 	apiInbound := map[string]any{
 		"tag":      "api",
@@ -929,7 +955,7 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 	}
 	xcfg := map[string]any{
 		"log":      map[string]any{"loglevel": "info"},
-		"inbounds": []any{realityInbound, apiInbound},
+		"inbounds": append(inbounds, apiInbound),
 		"outbounds": []any{
 			map[string]any{"tag": "direct", "protocol": "freedom"},
 			map[string]any{"tag": "block", "protocol": "blackhole"},
@@ -1225,26 +1251,49 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 	if xhttp := xhttpSettings(cfg); xhttp != nil {
 		reality["xhttp"] = xhttp
 	}
+	cohorts := activeCohortShortIDs(st, revokedShortIDs(cfg.StateDir))
+	reality["cohort_short_ids"] = cohorts
+	realityProfilePayloads := []any{}
+	for _, profile := range realityProfiles(cfg) {
+		payload := map[string]any{
+			"name":        profile.Name,
+			"address":     cfg.PublicAddress,
+			"port":        profile.PublicPort,
+			"network":     profile.Network,
+			"server_name": cfg.CamouflageDomain,
+			"public_key":  st.Reality.PublicKey,
+			"short_id":    st.Reality.ShortID,
+			"flows":       []string{""},
+		}
+		if profile.supportsVision() {
+			payload["flows"] = []string{"", flowVision}
+		}
+		if profile.Network == "xhttp" {
+			payload["xhttp"] = realityXHTTPSettings(profile)
+		}
+		realityProfilePayloads = append(realityProfilePayloads, payload)
+	}
 	awgProfilePayloads := make([]any, 0, len(awgProfiles(cfg)))
 	for _, profile := range awgProfiles(cfg) {
 		awgProfilePayloads = append(awgProfilePayloads, awgSelfDescribe(cfg, st, profile))
 	}
 	baseAWG := awgSelfDescribe(cfg, st, baseAWGProfile(cfg))
 	out := map[string]any{
-		"schema":          "trafficwrapper-worker-p0",
-		"hostname":        st.Hostname,
-		"egress_ip":       cfg.EgressIP,
-		"orch_url":        cfg.OrchURL,
-		"agent_url":       cfg.WorkerAgentURL,
-		"distributor_url": cfg.DistributorURL,
-		"standalone":      cfg.OrchURL == "",
-		"dialect_id":      st.DialectID,
-		"capacity":        cfg.Capacity,
-		"protocols":       []string{"REALITY", "AWG"},
-		"reality":         reality,
-		"awg":             baseAWG,
-		"awg_profiles":    awgProfilePayloads,
-		"health":          healthSnapshot(),
+		"schema":           "trafficwrapper-worker-p0",
+		"hostname":         st.Hostname,
+		"egress_ip":        cfg.EgressIP,
+		"orch_url":         cfg.OrchURL,
+		"agent_url":        cfg.WorkerAgentURL,
+		"distributor_url":  cfg.DistributorURL,
+		"standalone":       cfg.OrchURL == "",
+		"dialect_id":       st.DialectID,
+		"capacity":         cfg.Capacity,
+		"protocols":        []string{"REALITY", "AWG"},
+		"reality":          reality,
+		"reality_profiles": realityProfilePayloads,
+		"awg":              baseAWG,
+		"awg_profiles":     awgProfilePayloads,
+		"health":           healthSnapshot(),
 		"orchestrator": map[string]any{
 			"noise_xk_ready":  true,
 			"pull_ready":      true,

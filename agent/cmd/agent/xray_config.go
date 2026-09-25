@@ -167,7 +167,7 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		"settings": map[string]any{"address": "127.0.0.1", "port": xrayAPIInPort, "network": "unix"},
 	}
 	xcfg := map[string]any{
-		"log":      map[string]any{"loglevel": "info"},
+		"log":      xrayLogSettings(),
 		"inbounds": append(inbounds, apiInbound),
 		"outbounds": []any{
 			xrayDirectOutbound(cfg),
@@ -192,6 +192,17 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		xcfg["dns"] = dns
 	}
 	return xcfg
+}
+
+// xrayLogSettings keeps Xray from recording who connected where. Xray writes
+// an access log unless it is explicitly set to "none", and each line would
+// carry the client's real address, the destination and the device ID.
+func xrayLogSettings() map[string]any {
+	return map[string]any{
+		"access":   "none",
+		"dnsLog":   false,
+		"loglevel": "warning",
+	}
 }
 
 // xrayDirectOutbound connects to the address Xray's own resolver returned.

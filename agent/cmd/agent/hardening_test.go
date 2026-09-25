@@ -174,6 +174,20 @@ func TestXrayAPIListensOnlyOnUnixSocket(t *testing.T) {
 	}
 }
 
+func TestXrayConfigDisablesAccessLog(t *testing.T) {
+	doc := xrayConfigDocument(envConfig{}, hardeningTestState(), nil)
+	logCfg, _ := doc["log"].(map[string]any)
+	if logCfg["access"] != "none" {
+		t.Fatalf("access log must be disabled: %#v", logCfg)
+	}
+	if logCfg["dnsLog"] != false {
+		t.Fatalf("dns log must be disabled: %#v", logCfg)
+	}
+	if level := logCfg["loglevel"]; level != "warning" && level != "error" && level != "none" {
+		t.Fatalf("loglevel %v logs per-connection details", level)
+	}
+}
+
 func TestXrayRoutingBlocksPrivateDestinationsByDefault(t *testing.T) {
 	routing := xrayRouting(envConfig{})
 	raw, _ := json.Marshal(routing)

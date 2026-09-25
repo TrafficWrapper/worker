@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/amnezia-vpn/amneziawg-go/tun"
 )
 
 // fakeCommands replaces runCommand for the test and records every command.
@@ -56,6 +58,64 @@ func TestHealthcheckChecksInterfaceOfGivenConfig(t *testing.T) {
 	fakeCommands(t, func(string) bool { return true })
 	if err := runHealthcheck([]string{"--config", path}); err == nil {
 		t.Fatal("missing interface reported healthy")
+	}
+}
+
+// fakeTUN replaces createTUN and records the commands already run when the
+// TUN would be created. It fails, so runGateway stops right after.
+func fakeTUN(t *testing.T, ran *[]string) *[]string {
+	t.Helper()
+	var before []string
+	orig := createTUN
+	createTUN = func(string, int) (tun.Device, error) {
+		before = append([]string(nil), *ran...)
+		return nil, errors.New("fake TUN stop")
+	}
+	t.Cleanup(func() { createTUN = orig })
+	return &before
+}
+
+func TestGatewayInstallsIsolationBeforeCreatingTUN(t *testing.T) {
+	t.Setenv("WORKER_ALLOW_PRIVATE_EGRESS", "")
+	t.Setenv("WORKER_BLOCK_SMTP", "")
+	t.Setenv("AWG_LOG_LEVEL", "silent")
+	path := writeTestConfig(t, validTestConfig())
+
+	ran := fakeCommands(t, nil)
+	before := fakeTUN(t, ran)
+	err := runGateway(path)
+	if err == nil || !strings.Contains(err.Error(), "fake TUN stop") {
+		t.Fatalf("runGateway error=%v, want the fake TUN failure", err)
+	}
+	isolation := strings.Join(*before, "\n")
+	for _, want := range []string{"trafficwrapper_awg_isolation forward iifname awg1 ip daddr", "tcp dport { 25, 465, 587 } drop"} {
+		if !strings.Contains(isolation, want) {
+			t.Fatalf("isolation rule %q not installed before the TUN:\n%s", want, isolation)
+		}
+	}
+}
+
+func TestGatewayDoesNotStartWithoutIsolation(t *testing.T) {
+	t.Setenv("WORKER_ALLOW_PRIVATE_EGRESS", "")
+	t.Setenv("WORKER_BLOCK_SMTP", "")
+	t.Setenv("AWG_LOG_LEVEL", "silent")
+	path := writeTestConfig(t, validTestConfig())
+
+	ran := fakeCommands(t, func(cmd string) bool { return strings.Contains(cmd, "_isolation") })
+	tunCalled := false
+	orig := createTUN
+	createTUN = func(string, int) (tun.Device, error) {
+		tunCalled = true
+		return nil, errors.New("fake TUN stop")
+	}
+	t.Cleanup(func() { createTUN = orig })
+
+	err := runGateway(path)
+	if err == nil || strings.Contains(err.Error(), "fake TUN stop") {
+		t.Fatalf("runGateway error=%v, want the isolation failure", err)
+	}
+	if tunCalled {
+		t.Fatalf("TUN created although isolation failed; commands: %v", *ran)
 	}
 }
 

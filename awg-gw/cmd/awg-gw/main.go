@@ -112,6 +112,9 @@ var runCommand = func(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).CombinedOutput()
 }
 
+// createTUN is tun.CreateTUN; tests replace it to check the startup order.
+var createTUN = tun.CreateTUN
+
 func runStub() error {
 	serviceName := getenv("SERVICE_NAME", "awg-gw")
 	listenUDP := getenv("AWG_LISTEN_UDP", strconv.Itoa(defaultPort))
@@ -157,13 +160,27 @@ func runGateway(path string) error {
 		awgdialect.MobileSafeOuterMTU,
 	)
 
-	tdev, err := tun.CreateTUN(cfg.Interface, effectiveMTU)
+	// The isolation filter goes in before the interface exists, so no client
+	// packet is ever forwarded without it; the rules match by name.
+	isolation, err := isolationFromEnv()
+	if err != nil {
+		return err
+	}
+	if err := configureClientIsolation(cfg.Interface, isolation); err != nil {
+		return err
+	}
+
+	tdev, err := createTUN(cfg.Interface, effectiveMTU)
 	if err != nil {
 		return fmt.Errorf("create TUN %s: %w", cfg.Interface, err)
 	}
 	realName, err := tdev.Name()
-	if err == nil && realName != "" {
+	if err == nil && realName != "" && realName != cfg.Interface {
 		cfg.Interface = realName
+		if err := configureClientIsolation(cfg.Interface, isolation); err != nil {
+			tdev.Close()
+			return err
+		}
 	}
 
 	uapiFile, err := ipc.UAPIOpen(cfg.Interface)
@@ -188,10 +205,6 @@ func runGateway(path string) error {
 		return err
 	}
 	if err := configureEgressNAT(cfg.Interface, cfg.Address); err != nil {
-		uapiFile.Close()
-		return err
-	}
-	if err := configureClientIsolation(cfg.Interface); err != nil {
 		uapiFile.Close()
 		return err
 	}
@@ -337,8 +350,7 @@ func configureInterface(name, address string, mtu int) error {
 		{"ip", "link", "set", "dev", name, "mtu", strconv.Itoa(mtu), "up"},
 	}
 	for _, args := range commands {
-		cmd := exec.Command(args[0], args[1:]...)
-		out, err := cmd.CombinedOutput()
+		out, err := runCommand(args[0], args[1:]...)
 		if err != nil {
 			return fmt.Errorf("%s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
@@ -363,8 +375,7 @@ func configureEgressNAT(name, address string) error {
 		{"nft", "add", "rule", "ip", table, "postrouting", "oifname", "!=", name, "ip", "saddr", prefix.String(), "masquerade"},
 	}
 	for _, args := range commands {
-		cmd := exec.Command(args[0], args[1:]...)
-		out, err := cmd.CombinedOutput()
+		out, err := runCommand(args[0], args[1:]...)
 		if err != nil {
 			msg := strings.TrimSpace(string(out))
 			if strings.Contains(msg, "File exists") || strings.Contains(msg, "Could not process rule: File exists") {
@@ -421,19 +432,16 @@ func isolationFromEnv() (isolationSettings, error) {
 	return isolationSettings{BlockPrivate: !allowPrivate, BlockSMTP: blockSMTP}, nil
 }
 
-func configureClientIsolation(name string) error {
-	settings, err := isolationFromEnv()
-	if err != nil {
-		return err
-	}
+// configureClientIsolation fails when a required rule cannot be installed, so
+// the gateway never serves clients without the filter.
+func configureClientIsolation(name string, settings isolationSettings) error {
 	allowPrivate, blockSMTP := !settings.BlockPrivate, settings.BlockSMTP
 	if allowPrivate && !blockSMTP {
 		fmt.Println("client_isolation=disabled by WORKER_ALLOW_PRIVATE_EGRESS=1")
 		return nil
 	}
 	for _, args := range clientIsolationCommands(name, !allowPrivate, blockSMTP) {
-		cmd := exec.Command(args[0], args[1:]...)
-		out, err := cmd.CombinedOutput()
+		out, err := runCommand(args[0], args[1:]...)
 		if err != nil {
 			msg := strings.TrimSpace(string(out))
 			if strings.Contains(msg, "File exists") {

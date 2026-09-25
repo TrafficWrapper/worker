@@ -39,6 +39,12 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 	oldRaw, _ := os.ReadFile(xrayConfigPath(cfg))
 	xrayChanged := string(oldRaw) != string(xrayRaw)
 	restartPending := xrayRestartPending(cfg)
+	// The file on disk may never have reached Xray (an older agent wrote it
+	// without applying). Once the agent has recorded what it applied, a file
+	// that differs from that record is not trusted for a live diff.
+	if applied, ok := xrayAppliedHash(cfg); ok && len(oldRaw) > 0 && applied != sha256HexBytes(oldRaw) {
+		restartPending = true
+	}
 	if !xrayChanged && !restartPending {
 		return nil
 	}
@@ -56,6 +62,7 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 			if err := clearXrayRestartPending(cfg); err != nil {
 				return fmt.Errorf("clear xray restart pending: %w", err)
 			}
+			recordXrayAppliedHash(cfg, xrayRaw)
 			recordXrayApply("live")
 			slog.Info("xray materialized without restart", "approved_devices", approvedDeviceCount)
 			return nil
@@ -69,11 +76,32 @@ func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) err
 		return fmt.Errorf("request xray restart: %w", err)
 	}
 	recordXrayApply("restart")
+	recordXrayAppliedHash(cfg, xrayRaw)
 	if err := clearXrayRestartPending(cfg); err != nil {
 		return fmt.Errorf("clear xray restart pending: %w", err)
 	}
 	slog.Info("xray materialized and restart requested", "approved_devices", approvedDeviceCount)
 	return nil
+}
+
+func xrayAppliedHashPath(cfg envConfig) string {
+	return filepath.Join(cfg.StateDir, "xray", "applied.sha256")
+}
+
+// xrayAppliedHash is the sha256 of the config Xray was last made to load,
+// live or through a restart.
+func xrayAppliedHash(cfg envConfig) (string, bool) {
+	raw, err := os.ReadFile(xrayAppliedHashPath(cfg))
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(raw)), true
+}
+
+func recordXrayAppliedHash(cfg envConfig, xrayRaw []byte) {
+	if err := writeFile(xrayAppliedHashPath(cfg), []byte(sha256HexBytes(xrayRaw)+"\n"), 0o600); err != nil {
+		slog.Warn("xray applied config hash not saved", "err", err)
+	}
 }
 
 type xrayUserDiff struct {

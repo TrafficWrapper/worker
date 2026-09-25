@@ -36,6 +36,8 @@ type orchState struct {
 
 type orchStartRequest struct {
 	Message string `json:"message"`
+	// Cookie is the latest handshake cookie from the orchestrator, if any.
+	Cookie string `json:"cookie,omitempty"`
 }
 
 type orchStartResponse struct {
@@ -55,6 +57,8 @@ type orchEnvelopeResponse struct {
 	OK      bool   `json:"ok"`
 	Error   string `json:"error,omitempty"`
 	Payload string `json:"payload,omitempty"`
+	// Cookie is an optional handshake cookie for the next handshake start.
+	Cookie string `json:"cookie,omitempty"`
 }
 
 type orchEnrollRequest struct {
@@ -685,7 +689,7 @@ func (c *orchClient) noiseCall(ctx context.Context, path string, req any, resp a
 		return err
 	}
 	var start orchStartResponse
-	if err := c.postJSON(ctx, "/w/v1/handshake/start", orchStartRequest{Message: base64.StdEncoding.EncodeToString(msg1)}, &start); err != nil {
+	if err := c.postJSON(ctx, "/w/v1/handshake/start", orchStartRequest{Message: base64.StdEncoding.EncodeToString(msg1), Cookie: c.currentHandshakeCookie()}, &start); err != nil {
 		return err
 	}
 	if !start.OK {
@@ -709,6 +713,9 @@ func (c *orchClient) noiseCall(ctx context.Context, path string, req any, resp a
 	var envResp orchEnvelopeResponse
 	if err := c.postJSON(ctx, path, orchEnvelope{SID: start.SID, Message: base64.StdEncoding.EncodeToString(msg3), Payload: base64.StdEncoding.EncodeToString(payload)}, &envResp); err != nil {
 		return err
+	}
+	if envResp.Cookie != "" {
+		c.rememberHandshakeCookie(envResp.Cookie)
 	}
 	if !envResp.OK {
 		return &orchUnavailableError{message: envResp.Error}

@@ -74,7 +74,7 @@ func main() {
 	case "run":
 		err = runGateway(configPath(args))
 	case "healthcheck":
-		err = runHealthcheck()
+		err = runHealthcheck(args)
 	case "validate-config":
 		err = validateConfigCommand(configPath(args))
 	case "show-config":
@@ -91,13 +91,29 @@ func main() {
 }
 
 func configPath(args []string) string {
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--config" && i+1 < len(args) {
-			return args[i+1]
-		}
+	if path, ok := configFlag(args); ok {
+		return path
 	}
 	return defaultConfig
 }
+
+// configFlag returns the value of --config and whether it was given.
+func configFlag(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--config" && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+// runCommand runs a host networking command (ip, nft, tc); tests replace it.
+var runCommand = func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+// createTUN is tun.CreateTUN; tests replace it to check the startup order.
+var createTUN = tun.CreateTUN
 
 func runStub() error {
 	serviceName := getenv("SERVICE_NAME", "awg-gw")
@@ -144,13 +160,31 @@ func runGateway(path string) error {
 		awgdialect.MobileSafeOuterMTU,
 	)
 
-	tdev, err := tun.CreateTUN(cfg.Interface, effectiveMTU)
+	// The isolation filter goes in before the interface exists, so no client
+	// packet is ever forwarded without it; the rules match by name.
+	isolation, err := isolationFromEnv()
+	if err != nil {
+		return err
+	}
+	workers, err := parseWorkerAddresses(cfg.WorkerAddresses)
+	if err != nil {
+		return err
+	}
+	if err := configureClientIsolation(cfg.Interface, isolation, workers); err != nil {
+		return err
+	}
+
+	tdev, err := createTUN(cfg.Interface, effectiveMTU)
 	if err != nil {
 		return fmt.Errorf("create TUN %s: %w", cfg.Interface, err)
 	}
 	realName, err := tdev.Name()
-	if err == nil && realName != "" {
+	if err == nil && realName != "" && realName != cfg.Interface {
 		cfg.Interface = realName
+		if err := configureClientIsolation(cfg.Interface, isolation, workers); err != nil {
+			tdev.Close()
+			return err
+		}
 	}
 
 	uapiFile, err := ipc.UAPIOpen(cfg.Interface)
@@ -175,10 +209,6 @@ func runGateway(path string) error {
 		return err
 	}
 	if err := configureEgressNAT(cfg.Interface, cfg.Address); err != nil {
-		uapiFile.Close()
-		return err
-	}
-	if err := configureClientIsolation(cfg.Interface); err != nil {
 		uapiFile.Close()
 		return err
 	}
@@ -225,16 +255,37 @@ func awgLogLevel(value string) (int, error) {
 	}
 }
 
-func serveUAPI(dev *device.Device, uapi net.Listener, errs chan<- error) {
+// serveUAPI accepts UAPI connections until the listener is closed. A failed
+// Accept (for example running out of file descriptors) is retried with a
+// short backoff instead of stopping the gateway and every tunnel with it.
+func serveUAPI(dev uapiHandler, uapi net.Listener, errs chan<- error) {
+	delay := uapiAcceptMinDelay
 	for {
 		c, err := uapi.Accept()
 		if err != nil {
-			errs <- err
-			return
+			if errors.Is(err, net.ErrClosed) {
+				errs <- err
+				return
+			}
+			fmt.Fprintf(os.Stderr, "uapi accept failed, retrying in %s: %v\n", delay, err)
+			time.Sleep(delay)
+			delay = min(delay*2, uapiAcceptMaxDelay)
+			continue
 		}
+		delay = uapiAcceptMinDelay
 		go dev.IpcHandle(c)
 	}
 }
+
+// uapiHandler is the part of *device.Device serveUAPI needs.
+type uapiHandler interface {
+	IpcHandle(net.Conn)
+}
+
+var (
+	uapiAcceptMinDelay = 50 * time.Millisecond
+	uapiAcceptMaxDelay = 5 * time.Second
+)
 
 func applyDeviceConfig(dev *device.Device, cfg Config) error {
 	peers, err := loadActivePeers(cfg.PeerRegistry, time.Now().UTC())
@@ -324,8 +375,7 @@ func configureInterface(name, address string, mtu int) error {
 		{"ip", "link", "set", "dev", name, "mtu", strconv.Itoa(mtu), "up"},
 	}
 	for _, args := range commands {
-		cmd := exec.Command(args[0], args[1:]...)
-		out, err := cmd.CombinedOutput()
+		out, err := runCommand(args[0], args[1:]...)
 		if err != nil {
 			return fmt.Errorf("%s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 		}
@@ -350,8 +400,7 @@ func configureEgressNAT(name, address string) error {
 		{"nft", "add", "rule", "ip", table, "postrouting", "oifname", "!=", name, "ip", "saddr", prefix.String(), "masquerade"},
 	}
 	for _, args := range commands {
-		cmd := exec.Command(args[0], args[1:]...)
-		out, err := cmd.CombinedOutput()
+		out, err := runCommand(args[0], args[1:]...)
 		if err != nil {
 			msg := strings.TrimSpace(string(out))
 			if strings.Contains(msg, "File exists") || strings.Contains(msg, "Could not process rule: File exists") {
@@ -388,16 +437,40 @@ var privateDestinations6 = []string{
 	"ff00::/8",
 }
 
-func configureClientIsolation(name string) error {
-	allowPrivate := strings.TrimSpace(os.Getenv("WORKER_ALLOW_PRIVATE_EGRESS")) == "1"
-	blockSMTP := strings.TrimSpace(os.Getenv("WORKER_BLOCK_SMTP")) != "0"
+// isolationSettings are the client egress switches. They are parsed with the
+// same strict parser as the agent's, so AWG and REALITY clients get the same
+// blocking for any value.
+type isolationSettings struct {
+	BlockPrivate bool
+	BlockSMTP    bool
+}
+
+func isolationFromEnv() (isolationSettings, error) {
+	allowPrivate, err := serverpeer.EnvBool("WORKER_ALLOW_PRIVATE_EGRESS", false)
+	if err != nil {
+		return isolationSettings{}, err
+	}
+	blockSMTP, err := serverpeer.EnvBool("WORKER_BLOCK_SMTP", true)
+	if err != nil {
+		return isolationSettings{}, err
+	}
+	return isolationSettings{BlockPrivate: !allowPrivate, BlockSMTP: blockSMTP}, nil
+}
+
+// configureClientIsolation fails when a required rule cannot be installed, so
+// the gateway never serves clients without the filter.
+func configureClientIsolation(name string, settings isolationSettings, workers []netip.Addr) error {
+	allowPrivate, blockSMTP := !settings.BlockPrivate, settings.BlockSMTP
 	if allowPrivate && !blockSMTP {
 		fmt.Println("client_isolation=disabled by WORKER_ALLOW_PRIVATE_EGRESS=1")
 		return nil
 	}
-	for _, args := range clientIsolationCommands(name, !allowPrivate, blockSMTP) {
-		cmd := exec.Command(args[0], args[1:]...)
-		out, err := cmd.CombinedOutput()
+	commands := clientIsolationCommands(name, !allowPrivate, blockSMTP)
+	if !allowPrivate {
+		commands = append(commands, workerAddressCommands(name, workers)...)
+	}
+	for _, args := range commands {
+		out, err := runCommand(args[0], args[1:]...)
 		if err != nil {
 			msg := strings.TrimSpace(string(out))
 			if strings.Contains(msg, "File exists") {
@@ -406,8 +479,46 @@ func configureClientIsolation(name string) error {
 			return fmt.Errorf("%s failed: %w: %s", strings.Join(args, " "), err, msg)
 		}
 	}
-	fmt.Printf("client_isolation=enabled iface=%s private=%t smtp=%t\n", name, !allowPrivate, blockSMTP)
+	fmt.Printf("client_isolation=enabled iface=%s private=%t smtp=%t worker_addresses=%d\n", name, !allowPrivate, blockSMTP, len(workers))
 	return nil
+}
+
+// workerAddressCommands drop client traffic to the worker's own public
+// addresses: through them clients would reach services published on the
+// host, which the private ranges do not cover. Must follow
+// clientIsolationCommands, which creates the chain.
+func workerAddressCommands(name string, workers []netip.Addr) [][]string {
+	table := natTableName(name) + "_isolation"
+	var v4, v6 []string
+	for _, addr := range workers {
+		if addr.Is4() {
+			v4 = append(v4, addr.String())
+		} else {
+			v6 = append(v6, addr.String())
+		}
+	}
+	var commands [][]string
+	if len(v4) > 0 {
+		commands = append(commands, []string{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip", "daddr", "{", strings.Join(v4, ", "), "}", "drop"})
+	}
+	if len(v6) > 0 {
+		commands = append(commands, []string{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip6", "daddr", "{", strings.Join(v6, ", "), "}", "drop"})
+	}
+	return commands
+}
+
+// parseWorkerAddresses accepts only literal IPs without a zone; the agent
+// never writes anything else, so any other value is a config error.
+func parseWorkerAddresses(values []string) ([]netip.Addr, error) {
+	addrs := make([]netip.Addr, 0, len(values))
+	for _, value := range values {
+		addr, err := netip.ParseAddr(value)
+		if err != nil || addr.Zone() != "" {
+			return nil, fmt.Errorf("worker_addresses: %q is not an IP address", value)
+		}
+		addrs = append(addrs, addr.Unmap())
+	}
+	return addrs, nil
 }
 
 func clientIsolationCommands(name string, blockPrivate, blockSMTP bool) [][]string {
@@ -475,20 +586,30 @@ func forwardingEnabled(path string) bool {
 	return err == nil && strings.TrimSpace(string(raw)) == "1"
 }
 
-func runHealthcheck() error {
-	if _, err := os.Stat(defaultConfig); err == nil {
-		cfg, err := loadConfig(defaultConfig)
-		if err != nil {
-			return err
+// runHealthcheck checks the interface of the config given with --config, the
+// same flag "run" takes, so a gateway started with another config is not
+// reported by the state of the base interface. Without the flag a missing
+// default config means stub mode; a config named explicitly must exist.
+func runHealthcheck(args []string) error {
+	path, explicit := configFlag(args)
+	if !explicit {
+		path = defaultConfig
+	}
+	if _, err := os.Stat(path); err != nil {
+		if explicit {
+			return fmt.Errorf("healthcheck config: %w", err)
 		}
-		cmd := exec.Command("ip", "link", "show", "dev", cfg.Interface)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("healthcheck ip link: %w: %s", err, strings.TrimSpace(string(out)))
-		}
-		fmt.Println("awg-gw run mode healthy")
+		fmt.Println("awg-gw stub healthy")
 		return nil
 	}
-	fmt.Println("awg-gw stub healthy")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return err
+	}
+	if out, err := runCommand("ip", "link", "show", "dev", cfg.Interface); err != nil {
+		return fmt.Errorf("healthcheck ip link: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	fmt.Printf("awg-gw run mode healthy interface=%s\n", cfg.Interface)
 	return nil
 }
 
@@ -577,6 +698,9 @@ func validateConfig(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.PublicKey) == "" {
 		return errors.New("public_key must be set for reporting")
+	}
+	if _, err := parseWorkerAddresses(cfg.WorkerAddresses); err != nil {
+		return err
 	}
 	if err := awgdialect.Validate(cfg.Dialect, device.DefaultMTU); err != nil {
 		return err

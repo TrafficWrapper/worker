@@ -186,8 +186,8 @@ cp .env.example .env
 - `PUBLIC_ADDRESS`: публичный DNS/IP этого worker.
 - `CAMOUFLAGE_DOMAIN`: реальный TLS 1.3 SNI/fallback домен для REALITY. Пустое
   значение и `example.com`/`example.org` отклоняются.
-- `WAN_IF`: egress interface, если включаете nft NAT automation.
-- `APPLY_NFT=1`: только после проверки generated NAT/firewall rules.
+- `WAN_IF`: egress interface, из которого `install.sh` берёт публичный IP,
+  если внешние сервисы расходятся.
 
 Запуск:
 
@@ -209,8 +209,7 @@ signed config, сгенерирует/применит REALITY и AWG settings �
 - выбрать свободные порты: 443 для REALITY, если свободен, иначе случайные
   (или из `REALITY_PORT_POOL` / `AWG_PORT_POOL`, если заданы);
 - определить WAN interface и public egress;
-- записать `.env`;
-- при `APPLY_NFT=1` поставить nft accept/NAT rules для выбранных портов.
+- записать `.env`.
 
 Запускайте его с реальным camouflage value, например:
 
@@ -218,7 +217,11 @@ signed config, сгенерирует/применит REALITY и AWG settings �
 CAMOUFLAGE_DOMAIN=www.your-real-tls13-domain.tld ./install.sh
 ```
 
-Держите `APPLY_NFT=0`, пока не проверите firewall/NAT changes.
+`install.sh` не меняет firewall хоста. Docker сам публикует `XRAY_PORT`/tcp и
+`AWG_PORT`/udp и делает NAT в обход цепочки `INPUT`, поэтому разрешайте или
+ограничивайте эти порты в цепочке Docker `DOCKER-USER` (или в облачном
+firewall). Опция `APPLY_NFT` удалена: при `APPLY_NFT=1` `install.sh`
+завершается с ошибкой.
 
 ## Переменные окружения
 
@@ -243,7 +246,7 @@ binaries:
 | `WORKER_BLOCK_SMTP` | Блокирует клиентам исходящую почту на порты 25/465/587 (Xray и AWG). | Опц. | `1` | Оставьте `1`: спам с IP воркера приводит к блокировке хоста. |
 | `WORKER_BLOCK_BITTORRENT` | Блокирует BitTorrent для REALITY-клиентов (включает sniffing Xray с `routeOnly`). | Опц. | `1` | Оставьте `1`, чтобы хостер не получал DMCA-жалобы. |
 | `REALITY_PROBE_ADDR` | Адрес, по которому агент проверяет свой REALITY-листенер как цензор без ключа клиента. | Опц. | `xray:8443` | Оставьте default Compose. |
-| `WORKER_ALLOW_PRIVATE_EGRESS` | Разрешает VPN-клиентам доступ к приватным, loopback, link-local (cloud metadata) и внутренним Docker-адресам через воркер. | Опц. | `0` | Оставьте `0`: такие диапазоны блокируют и роутинг Xray, и forward-фильтр `awg-gw`. |
+| `WORKER_ALLOW_PRIVATE_EGRESS` | Разрешает VPN-клиентам доступ к приватным, loopback, link-local (cloud metadata) и внутренним Docker-адресам, а также к собственным публичным адресам воркера. | Опц. | `0` | Оставьте `0`: такие диапазоны блокируют и роутинг Xray, и forward-фильтр `awg-gw`. |
 | `WORKER_SMOKE_PEERS` | Встроенные smoke-учётки (`p0-smoke` в REALITY и smoke-пир AWG). | Опц. | включены в standalone, выключены при `ORCH_URL` | `1` — оставить на воркере с оркестратором для `awg-smoke`, `0` — выключить. |
 | `XRAY_PORT` | Public TCP port, mapped to REALITY container. | Опц. | выбирает `install.sh` (fallback Compose `2053`) | `install.sh` берёт 443, если свободен, иначе случайный порт 20000-59999, и сохраняет его при повторных запусках. |
 | `AWG_PORT` | Public UDP port для AWG. | Опц. | выбирает `install.sh` (fallback Compose `51888`) | Случайный свободный UDP-порт 20000-59999, сохраняется при повторных запусках. |
@@ -273,7 +276,6 @@ binaries:
 | `WORKER_STATE_DIR` | Worker state directory внутри containers. | Опц. | `/var/lib/trafficwrapper-worker` в binaries; Compose использует `/worker-state` | Оставьте Compose default, если не запускаете binaries вручную. |
 | `TW_WORKER_DIALECT_JSON` | Advanced override AmneziaWG dialect JSON. | Опц. | generated dialect | Только для controlled testing. |
 | `WAN_IF` | Interface для `install.sh` egress IP detection. | Опц. | auto-detect | `eth0`, `ens3` и т.п. |
-| `APPLY_NFT` | Включает install-time nft accept rules для выбранных портов. | Опц. | `0` | `1` только после проверки rules. |
 | `EGRESS_VIA_WG` | Reserved deployment hint из `.env.example`; текущими binaries не используется. | Опц. | empty | Оставьте empty, если не расширяете scripts. |
 | `COMPOSE` | Compose command для `install.sh`/`uninstall.sh`. | Опц. | `docker compose` | `docker-compose` на старых hosts. |
 | `REALITY_PORT_POOL` | TCP-порты, из которых выбирает `install.sh`. | Опц. | 443, затем случайный | Список через пробел в кавычках, только чтобы зафиксировать выбор. |
@@ -318,8 +320,9 @@ sudo tar -czf worker-backup-$(date -u +%Y%m%dT%H%M%SZ).tgz worker-state .env
 
 `./uninstall.sh` пишет такой же архив (`worker-state-backup-<UTC>.tgz`) перед
 удалением state. Флаги: `--yes` (без вопроса; обязателен без TTY),
-`--keep-state`, `--purge-images` (дополнительно удаляет локально собранные
-образы и volume `awg-run`).
+`--keep-state`, `--purge-images` (дополнительно удаляет образы `worker-*`,
+собранные или скачанные, и named volumes). Если `docker compose down` падает,
+скрипт завершается с ошибкой и ничего не удаляет.
 
 Перенос воркера на другой хост: остановите его (`docker compose down`),
 скопируйте архив, склонируйте тот же релиз на новом хосте, распакуйте архив в
@@ -411,7 +414,8 @@ cosign verify ghcr.io/trafficwrapper/worker-agent:v1.2.3 \
   artifacts.
 - Используйте уникальный deployment dialect; worker state генерируется локально.
 - Клиенты не могут через воркер обращаться к приватным, loopback, link-local
-  и внутренним Docker-адресам (API агента, `/metrics`, хост, cloud metadata),
+  и внутренним Docker-адресам, а также к собственным публичным адресам воркера
+  (API агента, `/metrics`, хост, cloud metadata),
   пока не задан `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray выбрасывает приватные
   адреса из ответов DNS и подключается к адресу, который сам разрешил (только
   IPv4), поэтому имя не может смениться на приватный адрес между проверкой
@@ -421,8 +425,8 @@ cosign verify ghcr.io/trafficwrapper/worker-agent:v1.2.3 \
   При отзыве воркера агент удаляет всех пользователей и peers, перезапускает
   Xray, чтобы оборвать открытые сессии, удаляет опубликованный клиентский
   конфиг и APK и повторяет запрос раз в час.
-- Держите `APPLY_NFT=0` на тестах. Перед production включением проверьте
-  firewall/NAT rules.
+- Фильтруйте опубликованные порты в цепочке `DOCKER-USER`, а не `INPUT`:
+  Docker пробрасывает опубликованные порты раньше, чем их видят правила `INPUT`.
 - Worker enrollment tokens одноразовые; создавайте их в orchestrator и не
   храните в Git.
 

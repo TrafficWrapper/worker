@@ -91,13 +91,37 @@ func selfCheckStatus() string {
 
 func runHealthProbes(ctx context.Context, cfg envConfig) {
 	sleepCtx(ctx, probeStartupDelay)
+	failures := 0
 	for ctx.Err() == nil {
-		runHealthProbesOnce(ctx, cfg)
-		sleepCtx(ctx, probeInterval)
+		if runHealthProbesOnce(ctx, cfg) {
+			failures = 0
+		} else {
+			failures++
+		}
+		sleepCtx(ctx, nextProbeDelay(failures))
 	}
 }
 
-func runHealthProbesOnce(ctx context.Context, cfg envConfig) {
+// probeRetryMin is the first retry after a failed probe. A probe that races
+// Xray's startup or a short outage is retried soon, doubling up to the
+// regular interval, instead of reporting degraded for six hours.
+const probeRetryMin = time.Minute
+
+// nextProbeDelay is the wait after the given number of consecutive failed
+// runs (0 after a success).
+func nextProbeDelay(failures int) time.Duration {
+	if failures == 0 {
+		return probeInterval
+	}
+	delay := probeRetryMin
+	for i := 1; i < failures && delay < probeInterval; i++ {
+		delay *= 2
+	}
+	return min(delay, probeInterval)
+}
+
+// runHealthProbesOnce runs both probes and reports whether both passed.
+func runHealthProbesOnce(ctx context.Context, cfg envConfig) bool {
 	camouflage := probeCamouflageDest(ctx, cfg.RealityDest, cfg.CamouflageDomain)
 	reality := probeRealityFallback(ctx, cfg.RealityProbeAddr, cfg.CamouflageDomain)
 	currentHealth.Store(&healthState{Camouflage: &camouflage, Reality: &reality})
@@ -107,6 +131,7 @@ func runHealthProbesOnce(ctx context.Context, cfg envConfig) {
 	if !reality.OK {
 		slog.Warn("REALITY listener does not look like the camouflage site to a probe without a client key", "target", reality.Target, "camouflage_domain", cfg.CamouflageDomain, "problem", probeProblem(reality))
 	}
+	return camouflage.OK && reality.OK
 }
 
 // probeCamouflageDest checks the properties REALITY relies on: TLS 1.3 with

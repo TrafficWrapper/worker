@@ -34,22 +34,26 @@ func run(cfg envConfig) error {
 	if err := reconcileAWGPeers(cfg, st); err != nil {
 		slog.Warn("awg startup reconcile incomplete", "err", err)
 	}
+	localAPI, err := loadLocalAPIPolicy(cfg.AgentAPIAllowCIDRs)
+	if err != nil {
+		return err
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("/self-describe", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/self-describe", localAPI.wrap(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, selfDescribe(cfg, st))
-	})
+	}))
 	mux.HandleFunc("/enroll", standaloneStub("enroll", cfg))
 	mux.HandleFunc("/pull", standaloneStub("pull", cfg))
 	mux.HandleFunc("/nudge", standaloneStub("nudge", cfg))
 	mux.HandleFunc("/ack", standaloneStub("ack", cfg))
 	mux.HandleFunc("/orchestrator/telemetry", telemetryHandler(cfg, st))
-	// Compose publishes the agent port on host loopback by default; keep /metrics
-	// on this local agent surface because peer labels expose public keys/endpoints.
-	mux.HandleFunc("/metrics", metricsHandler(cfg, time.Now()))
+	// Compose publishes the agent port on host loopback only, and other
+	// containers are refused: peer labels expose public keys and endpoints.
+	mux.HandleFunc("/metrics", localAPI.wrap(metricsHandler(cfg, time.Now())))
 
 	srv := &http.Server{
 		Addr:              ":9090",

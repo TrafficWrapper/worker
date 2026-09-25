@@ -51,6 +51,7 @@ type envConfig struct {
 	RealityProfiles        []realityProfile
 	BlockSMTP              bool
 	BlockBitTorrent        bool
+	AgentAPIAllowCIDRs     string
 }
 
 type awgInboundProfile struct {
@@ -98,6 +99,7 @@ func readEnv() (envConfig, error) {
 		AWGUAPISocket:          getenv("AWG_UAPI_SOCKET", "/var/run/wireguard/awg1.sock"),
 		AWGServerKeepalive:     serverKeepalive,
 		MetricsScrubPeerLabels: getenv("TW_METRICS_SCRUB_PEER_LABELS", "0") == "1",
+		AgentAPIAllowCIDRs:     os.Getenv("AGENT_API_ALLOW_CIDRS"),
 		XrayAPISocket:          getenv("XRAY_API_SOCKET", defaultXrayAPISocket),
 		XrayBinary:             getenv("XRAY_BINARY", "/usr/local/bin/xray"),
 		OrchURL:                os.Getenv("ORCH_URL"),

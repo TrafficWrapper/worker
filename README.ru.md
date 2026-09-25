@@ -42,6 +42,8 @@ Worker agent отдаёт `/healthz`, `/self-describe` и `/metrics` на лок
 port (`127.0.0.1:9090` через default Compose mapping). Prometheus endpoint
 предназначен для localhost scraping, потому что AWG peer labels содержат public
 keys, allowed IPs и endpoints, если не задан `TW_METRICS_SCRUB_PEER_LABELS=1`.
+`/self-describe` и `/metrics` отвечают только loopback, шлюзу Docker-сети
+(опубликованный порт хоста) и `AGENT_API_ALLOW_CIDRS`; другим контейнерам — 404.
 См. [Monitoring](#monitoring).
 
 У каждого сервиса есть Docker healthcheck, поэтому `docker compose ps`
@@ -247,6 +249,7 @@ binaries:
 | `XRAY_PORT` | Public TCP port, mapped to REALITY container. | Опц. | `2053` | `8444`, `2053` или другой свободный TCP port. |
 | `AWG_PORT` | Public UDP port для AWG. | Опц. | `51888` | Любой свободный UDP port. |
 | `AGENT_PORT` | Localhost TCP port для worker agent health/API. | Опц. | `9090` | По умолчанию `127.0.0.1:9090`. |
+| `AGENT_API_ALLOW_CIDRS` | Дополнительные источники (CIDR или IP через запятую), которым можно читать `/self-describe` и `/metrics`. | Опц. | пусто | Только для scraper-контейнера в Compose-сети; loopback и порт хоста работают и без него. |
 | `AWG_SUBNET` | Worker AWG subnet для internal IP устройств. | Опц. | `10.13.13.0/24` | Private subnet без конфликтов с host. |
 | `AWG_GATEWAY` | AWG gateway address внутри `AWG_SUBNET`. | Опц. | первый host subnet | `10.13.13.1`. |
 | `AWG_UAPI_SOCKET` | WireGuard/AmneziaWG UAPI socket path. | Опц. | `/var/run/wireguard/awg1.sock` | Обычно задаёт Compose. |
@@ -402,7 +405,10 @@ cosign verify ghcr.io/trafficwrapper/worker-agent:v1.2.3 \
 - Используйте уникальный deployment dialect; worker state генерируется локально.
 - Клиенты не могут через воркер обращаться к приватным, loopback, link-local
   и внутренним Docker-адресам (API агента, `/metrics`, хост, cloud metadata),
-  пока не задан `WORKER_ALLOW_PRIVATE_EGRESS=1`.
+  пока не задан `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray выбрасывает приватные
+  адреса из ответов DNS и подключается к адресу, который сам разрешил (только
+  IPv4), поэтому имя не может смениться на приватный адрес между проверкой
+  маршрута и подключением.
 - Держите `APPLY_NFT=0` на тестах. Перед production включением проверьте
   firewall/NAT rules.
 - Worker enrollment tokens одноразовые; создавайте их в orchestrator и не

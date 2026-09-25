@@ -219,12 +219,17 @@ func (b *backoff) reset() {
 func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, client *orchClient) {
 	state := loadOrchState(cfg.StateDir)
 	orchAppliedSeqGauge.Store(state.AppliedSeq)
+	// Heartbeats (nudge, ack) and config pulls back off separately: a pull or
+	// apply that keeps failing must not stop the heartbeat, or the worker
+	// goes inactive while it still serves clients (WRK-M1).
 	retry := newBackoff(orchBackoffMin, orchBackoffMax)
+	pullRetry := newBackoff(orchBackoffMin, orchBackoffMax)
+	applyRetry := newBackoff(orchBackoffMin, orchBackoffMax)
 	apk := &apkDownloader{}
 	// A download in flight stops with ctx; wait for it so shutdown does not
 	// cut a file write short.
 	defer apk.wait()
-	var lastAck, lastPull time.Time
+	var lastAck, lastPull, nextPullAt, nextApplyRetryAt time.Time
 	pullNeeded := true
 	// A failed state write is retried on every pass: losing the worker ID or
 	// applied seq would mean a new enrollment or a full re-apply later.
@@ -238,6 +243,10 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			return
 		}
 		stateDirty = false
+	}
+	pullFailed := func() {
+		pullNeeded = true
+		nextPullAt = time.Now().Add(pullRetry.next())
 	}
 	for ctx.Err() == nil {
 		if stateDirty {
@@ -257,31 +266,24 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			persist(state)
 			slog.Info("orch enroll", "status", state.Status, "worker_id", state.WorkerID)
 		}
-		if pullNeeded || time.Since(lastPull) >= orchForcedPullInterval {
+		if (pullNeeded && !time.Now().Before(nextPullAt)) || time.Since(lastPull) >= orchForcedPullInterval {
+			lastPull = time.Now()
 			pull, err := client.pull(ctx, state.WorkerID, state.AppliedSeq)
 			recordOrchRequest("pull", err)
-			if err != nil {
+			switch {
+			case err != nil:
 				slog.Warn("orch pull failed", "err", err)
-				sleepCtx(ctx, retry.next())
+				pullFailed()
+			case !pull.OK && orchRevoked(pull.Status, pull.Code):
+				enterRevokedState(cfg, st, &state)
+				sleepCtx(ctx, orchRevokedRetry)
 				continue
-			}
-			lastPull = time.Now()
-			if pull.DesiredSeq > 0 {
-				orchDesiredSeqGauge.Store(pull.DesiredSeq)
-			}
-			if !pull.OK {
-				if orchRevoked(pull.Status, pull.Code) {
-					enterRevokedState(cfg, st, &state)
-					sleepCtx(ctx, orchRevokedRetry)
-					continue
-				}
+			case !pull.OK:
 				state.Status = pull.Status
 				persist(state)
 				slog.Warn("orch pull pending/error", "status", pull.Status, "error", pull.Error)
-				sleepCtx(ctx, retry.next())
-				continue
-			}
-			if state.Status == orchStatusRevoked {
+				pullFailed()
+			case state.Status == orchStatusRevoked:
 				// Serving again needs the full config, not a diff against
 				// the one dropped at revocation.
 				slog.Warn("orch reports the worker is no longer revoked; re-pulling the full config", "status", pull.Status)
@@ -289,19 +291,36 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				state.AppliedSeq = 0
 				persist(state)
 				continue
-			}
-			state.Status = pull.Status
-			if pull.UpdateRef != nil {
-				apk.handle(ctx, cfg, client, state.WorkerID, *pull.UpdateRef)
-			}
-			if !pull.NotModified {
+			default:
+				if pull.DesiredSeq > 0 {
+					orchDesiredSeqGauge.Store(pull.DesiredSeq)
+				}
+				state.Status = pull.Status
+				if pull.UpdateRef != nil {
+					apk.handle(ctx, cfg, client, state.WorkerID, *pull.UpdateRef)
+				}
+				if pull.NotModified {
+					persist(state)
+					pullNeeded = false
+					pullRetry.reset()
+					break
+				}
 				started := time.Now()
 				seq, clientSeq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)
 				applyDurationMillis.Store(time.Since(started).Milliseconds())
-				if err != nil {
+				var partial *partialApplyError
+				if err != nil && !errors.As(err, &partial) {
 					slog.Error("orch apply rejected", "err", err)
-					sleepCtx(ctx, retry.next())
-					continue
+					pullFailed()
+					break
+				}
+				// The bundle is accepted and cached even if a component
+				// failed; only that component is retried below.
+				setApplyIncomplete(partial != nil)
+				if partial != nil {
+					slog.Warn("orch applied with failures; retrying the failed parts", "seq", seq, "err", partial.err)
+					applyRetry.reset()
+					nextApplyRetryAt = time.Now().Add(applyRetry.next())
 				}
 				state.AppliedSeq = seq
 				state.ClientAppliedSeq = clientSeq
@@ -313,12 +332,19 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				slog.Info("orch applied", "seq", seq, "duration", time.Since(started).Round(time.Millisecond))
 				reportOrchAck(ctx, client, cfg, st, state.WorkerID, seq, state.ClientAppliedSeq)
 				lastAck = time.Now()
-				retry.reset()
+				pullNeeded = false
+				pullRetry.reset()
 				continue
 			}
-			persist(state)
-			pullNeeded = false
-			retry.reset()
+		}
+		if applyIncomplete() && !time.Now().Before(nextApplyRetryAt) {
+			if err := reapplyCachedDesiredState(cfg, st); err != nil {
+				slog.Warn("orch apply retry failed", "err", err)
+				nextApplyRetryAt = time.Now().Add(applyRetry.next())
+			} else {
+				slog.Info("orch apply retry succeeded")
+				setApplyIncomplete(false)
+			}
 		}
 		started := time.Now()
 		nudge, err := client.nudge(ctx, state.WorkerID, state.AppliedSeq, selfDescribe(cfg, st))
@@ -332,6 +358,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 		if !nudge.OK {
 			pullNeeded = true
 			if orchRevoked(nudge.Status, nudge.Code) {
+				nextPullAt = time.Time{}
 				continue
 			}
 			slog.Warn("orch nudge rejected", "status", nudge.Status, "code", nudge.Code, "error", nudge.Error)
@@ -359,10 +386,14 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			awgReconcileMillisTotal.Add(time.Since(reconcileStarted).Milliseconds())
 			lastAck = time.Now()
 		}
-		if !pullNeeded {
-			if elapsed := time.Since(started); elapsed < orchMinHeartbeatInterval {
-				sleepCtx(ctx, orchMinHeartbeatInterval-elapsed)
-			}
+		// A nudge answers at once while the desired seq is ahead, so wait
+		// for the pull backoff rather than spinning through nudges.
+		wait := orchMinHeartbeatInterval - time.Since(started)
+		if pullNeeded {
+			wait = time.Until(nextPullAt)
+		}
+		if wait > 0 {
+			sleepCtx(ctx, wait)
 		}
 	}
 }
@@ -750,9 +781,9 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 			slog.Warn("inline apk update not published", "err", err)
 		}
 	}
-	if err := applyDesiredState(cfg, st, ds); err != nil {
-		return 0, 0, err
-	}
+	// From here on the bundle is accepted: a failing component (one AWG
+	// profile, Xray) is reported as partial and retried from the cache.
+	partialErr := applyDesiredState(cfg, st, ds)
 	version := map[string]any{"version": fmt.Sprintf("orch-v%d", seq), "config_seq": seq, "created_at": time.Now().UTC().Format(time.RFC3339)}
 	if apk := distributedAPKInfo(cfg.StateDir); len(apk) > 0 {
 		version["distributed_apk"] = apk
@@ -762,6 +793,9 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 	}
 	if err := writeJSONFile(filepath.Join(cfg.StateDir, "distributor", "tw", "version.json"), version, 0o644); err != nil {
 		return 0, 0, err
+	}
+	if partialErr != nil {
+		return seq, clientSeq, &partialApplyError{err: partialErr}
 	}
 	return seq, clientSeq, nil
 }
@@ -932,3 +966,24 @@ type orchUnavailableError struct {
 }
 
 func (e *orchUnavailableError) Error() string { return e.message }
+
+// partialApplyError is an accepted bundle of which some part (an AWG profile,
+// Xray) could not be applied yet.
+type partialApplyError struct{ err error }
+
+func (e *partialApplyError) Error() string { return "partially applied: " + e.err.Error() }
+func (e *partialApplyError) Unwrap() error { return e.err }
+
+var applyIncompleteFlag atomic.Bool
+
+func setApplyIncomplete(v bool) { applyIncompleteFlag.Store(v) }
+func applyIncomplete() bool     { return applyIncompleteFlag.Load() }
+
+// reapplyCachedDesiredState retries the accepted config from the cache.
+func reapplyCachedDesiredState(cfg envConfig, st stateFile) error {
+	ds, err := loadCachedDesiredState(cfg.StateDir)
+	if err != nil {
+		return err
+	}
+	return applyDesiredState(cfg, st, ds)
+}

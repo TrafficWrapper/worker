@@ -65,6 +65,9 @@ func selfCheckStatus() string {
 	if platformClockSkewed() {
 		failed = append(failed, "clock")
 	}
+	if xrayConfigRejected.Load() {
+		failed = append(failed, "xray_config")
+	}
 	if len(failed) == 0 {
 		return "ok"
 	}

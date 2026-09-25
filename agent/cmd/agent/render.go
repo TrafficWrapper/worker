@@ -42,6 +42,11 @@ func renderAll(cfg envConfig, st stateFile) error {
 func renderXray(cfg envConfig, st stateFile) error {
 	devices := cachedDesiredState(cfg.StateDir).realityDevices(platformNow())
 	xrayRaw, err := xrayConfigBytes(cfg, st, devices)
+	if errors.Is(err, errNoShortIDs) {
+		// Keep whatever Xray runs now rather than a config it rejects.
+		slog.Error("xray config not rendered; keeping the last valid one", "err", err)
+		return nil
+	}
 	if err != nil {
 		return err
 	}

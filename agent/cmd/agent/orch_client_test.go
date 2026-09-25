@@ -37,7 +37,7 @@ func TestApplyOrchBundlesAllowsEqualClientSeqAndSkipsStrictRollback(t *testing.T
 	}
 	pubText := mustMarshalText(t, pub)
 	cfg := envConfig{StateDir: t.TempDir()}
-	var st stateFile
+	st := hardeningTestState()
 	xrayRaw, err := xrayConfigBytes(cfg, st, nil)
 	if err != nil {
 		t.Fatal(err)

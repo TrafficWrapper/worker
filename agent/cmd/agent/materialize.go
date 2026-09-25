@@ -113,13 +113,13 @@ func applyDesiredState(cfg envConfig, st stateFile, ds desiredState) error {
 	now := platformNow()
 	realityDevices := ds.realityDevices(now)
 	awgDevices := ds.awgDevices(now)
-	xrayRaw, err := xrayConfigBytes(cfg, st, realityDevices)
-	if err != nil {
-		return fmt.Errorf("render xray config: %w", err)
-	}
 	// AWG does not depend on Xray, so a Docker/Xray failure must not hold back
 	// AWG peers, and one failing AWG profile must not hold back the others.
 	var errs []error
+	xrayRaw, xrayErr := xrayConfigBytes(cfg, st, realityDevices)
+	if xrayErr != nil {
+		errs = append(errs, fmt.Errorf("render xray config (the running one is kept): %w", xrayErr))
+	}
 	for _, profile := range awgProfiles(cfg) {
 		desiredPeers, err := writeAWGPeerRegistryForProfile(cfg, st, awgDevices, profile)
 		if err != nil {
@@ -134,8 +134,10 @@ func applyDesiredState(cfg envConfig, st stateFile, ds desiredState) error {
 			slog.Info("awg materialized", "profile", profile.Name, "peers", len(desiredPeers), "uapi_socket", profile.UAPISocket)
 		}
 	}
-	if err := applyXrayConfig(cfg, xrayRaw, len(realityDevices)); err != nil {
-		errs = append(errs, err)
+	if xrayErr == nil {
+		if err := applyXrayConfig(cfg, xrayRaw, len(realityDevices)); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }

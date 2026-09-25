@@ -121,7 +121,7 @@ func TestApplyOrchBundlesChecksIdentityAndRejections(t *testing.T) {
 		"all rejected":  `,"desired_state":{"approved_devices":[{"device_id":"bad","reality_uuid":"x","status":"approved"}]}`,
 	} {
 		bundle := signedBundleForTest(t, priv, pubText, "worker-config-v1", 2, extra)
-		if _, _, err := applyOrchBundles(cfg, stateFile{}, state, bundle, client, nil); err == nil {
+		if _, _, err := applyOrchBundles(cfg, hardeningTestState(), state, bundle, client, nil); err == nil {
 			t.Fatalf("%s: bundle applied", name)
 		}
 		if fileExists(filepath.Join(cfg.StateDir, "orch", "worker-config.json")) {
@@ -129,12 +129,12 @@ func TestApplyOrchBundlesChecksIdentityAndRejections(t *testing.T) {
 		}
 	}
 	ok := signedBundleForTest(t, priv, pubText, "worker-config-v1", 2, `,"schema":1,"worker_id":"w-self","desired_state":{"approved_devices":[]}`)
-	if _, _, err := applyOrchBundles(cfg, stateFile{}, state, ok, client, nil); err != nil {
+	if _, _, err := applyOrchBundles(cfg, hardeningTestState(), state, ok, client, nil); err != nil {
 		t.Fatalf("own bundle rejected: %v", err)
 	}
 	legacy := signedBundleForTest(t, priv, pubText, "worker-config-v1", 3, `,"desired_state":{"approved_devices":[]}`)
 	state.AppliedSeq = 2
-	if _, _, err := applyOrchBundles(cfg, stateFile{}, state, legacy, client, nil); err != nil {
+	if _, _, err := applyOrchBundles(cfg, hardeningTestState(), state, legacy, client, nil); err != nil {
 		t.Fatalf("bundle without worker_id/schema rejected: %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -194,6 +195,10 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 	return xcfg
 }
 
+// xrayConfigRejected is set while the rendered Xray config is refused and the
+// last valid one stays in use; self_check reports it.
+var xrayConfigRejected atomic.Bool
+
 // xrayLogSettings keeps Xray from recording who connected where. Xray writes
 // an access log unless it is explicitly set to "none", and each line would
 // carry the client's real address, the destination and the device ID.
@@ -309,7 +314,16 @@ func writeXrayConfig(cfg envConfig, st stateFile, devices []approvedDevice) (boo
 	return true, writeXrayConfigBytes(cfg, raw)
 }
 
+// errNoShortIDs means the REALITY inbounds would accept no short ID. Xray
+// refuses such a config and would restart in a loop, so it is never written.
+var errNoShortIDs = errors.New("xray config has no REALITY short IDs")
+
 func xrayConfigBytes(cfg envConfig, st stateFile, devices []approvedDevice) ([]byte, error) {
+	if len(realityShortIDs(st, revokedShortIDs(cfg.StateDir))) == 0 {
+		xrayConfigRejected.Store(true)
+		return nil, errNoShortIDs
+	}
+	xrayConfigRejected.Store(false)
 	raw, err := json.MarshalIndent(xrayConfigDocument(cfg, st, devices), "", "  ")
 	if err != nil {
 		return nil, err

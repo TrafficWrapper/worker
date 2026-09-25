@@ -49,6 +49,21 @@ pick_udp_port() {
   exit 1
 }
 
+# is_global_ip succeeds for a global unicast address only.
+is_global_ip() {
+  python3 - "$1" <<'PY'
+import ipaddress, sys
+try:
+    sys.exit(0 if ipaddress.ip_address(sys.argv[1].strip()).is_global else 1)
+except ValueError:
+    sys.exit(1)
+PY
+}
+
+# detect_ip prints the public egress IPv4 only when it is global and either
+# confirmed by two echo services or read from WAN_IF. Otherwise it prints
+# nothing: .env keeps EGRESS_IP empty and the agent detects it at runtime,
+# instead of pinning a guess (such as a LAN address) forever.
 detect_ip() {
   if [ -n "${EGRESS_IP:-}" ]; then echo "$EGRESS_IP"; return; fi
   tmp=$(mktemp)
@@ -58,12 +73,14 @@ detect_ip() {
     printf '\n' >>"$tmp"
   done
   ip=$(awk 'NF && $1 ~ /^[0-9.]+$/ {c[$1]++} END{for (i in c) if (c[i] >= 2) {print i; exit}}' "$tmp")
-  if [ -n "$ip" ]; then echo "$ip"; return; fi
-  if [ -n "${WAN_IF:-}" ]; then
-    ip -4 addr show dev "$WAN_IF" | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}'
+  if [ -z "$ip" ] && [ -n "${WAN_IF:-}" ]; then
+    ip=$(ip -4 addr show dev "$WAN_IF" | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}')
+  fi
+  if [ -n "$ip" ] && is_global_ip "$ip"; then
+    echo "$ip"
     return
   fi
-  hostname -I | awk '{print $1}'
+  echo "WARNING: no confirmed global egress IP; leaving EGRESS_IP empty for the agent to detect" >&2
 }
 
 # detect_ipv6 asks from the host: containers on the default Compose network
@@ -114,6 +131,10 @@ write_env() {
   gateway=${AWG_GATEWAY:-$(env_value AWG_GATEWAY "$previous")}
   gateway=${gateway:-$(first_host "$subnet")}
   egress=${EGRESS_IP:-$(env_value EGRESS_IP "$previous")}
+  # A non-global value from an older install (e.g. hostname -I) is dropped.
+  if [ -n "$egress" ] && [ -z "${EGRESS_IP:-}" ] && ! is_global_ip "$egress"; then
+    egress=""
+  fi
   egress=${egress:-$(detect_ip)}
   camouflage=${CAMOUFLAGE_DOMAIN:-$(env_value CAMOUFLAGE_DOMAIN "$previous")}
   v6=${PUBLIC_ADDRESS_V6:-$(env_value PUBLIC_ADDRESS_V6 "$previous")}
@@ -129,11 +150,12 @@ write_env() {
 import sys
 previous, xr, awg, subnet, gateway, egress, camouflage, v6 = sys.argv[1:]
 kept = {}
+retired = {"APPLY_NFT"}
 if previous:
     for line in open(previous):
         if "=" in line and not line.lstrip().startswith("#"):
             k, v = line.rstrip("\n").split("=", 1)
-            if v != "":
+            if v != "" and k.strip() not in retired:
                 kept[k.strip()] = v
 repl = dict(kept)
 repl.update({
@@ -184,17 +206,18 @@ verify_dest_hint() {
   esac
 }
 
-apply_nft_optional() {
-  [ "${APPLY_NFT:-0}" = "1" ] || return 0
-  need nft
-  nft list ruleset >"worker-state/nft-backup.$(date -u +%Y%m%dT%H%M%SZ).txt"
-  xray_port=$(awk -F= '$1=="XRAY_PORT"{print $2}' .env)
-  awg_port=$(awk -F= '$1=="AWG_PORT"{print $2}' .env)
-  nft add table inet trafficwrapper_worker
-  nft 'add chain inet trafficwrapper_worker input { type filter hook input priority 20; policy accept; }'
-  nft flush chain inet trafficwrapper_worker input
-  nft add rule inet trafficwrapper_worker input tcp dport "$xray_port" counter accept
-  nft add rule inet trafficwrapper_worker input udp dport "$awg_port" counter accept
+# refuse_apply_nft stops on the retired APPLY_NFT=1 option instead of
+# ignoring it: install.sh no longer changes the host firewall. Docker
+# publishes the ports itself; restrict them in the DOCKER-USER chain.
+refuse_apply_nft() {
+  setting=${APPLY_NFT:-$(env_value APPLY_NFT .env)}
+  case "$setting" in
+    ""|0) return 0 ;;
+  esac
+  echo "error: APPLY_NFT=$setting is no longer supported: install.sh does not manage firewall rules." >&2
+  echo "Docker publishes XRAY_PORT/tcp and AWG_PORT/udp itself; allow them in your host firewall" >&2
+  echo "(filter published ports in the DOCKER-USER chain), then unset APPLY_NFT and re-run." >&2
+  exit 1
 }
 
 # verify_release_images checks the cosign signature of every pulled release
@@ -248,11 +271,11 @@ need ss
 need curl
 need python3
 need openssl
+refuse_apply_nft
 need_tun
 
 mkdir -p worker-state
 write_env
 verify_dest_hint
-apply_nft_optional
 start_services
 $COMPOSE ps

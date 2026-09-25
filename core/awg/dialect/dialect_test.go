@@ -209,3 +209,56 @@ func TestValidateAcceptsLegacyAndRejectsOutOfRangeJunk(t *testing.T) {
 		}
 	}
 }
+
+func TestSizeCollisionsFlagsReceiverOffset(t *testing.T) {
+	d := Dialect{S1: 30, S2: 24, S3: 10, S4: 20} // S2 == S4+4
+	if got := SizeCollisions(d); len(got) != 1 || got[0] != "s2/response" {
+		t.Fatalf("collisions %v", got)
+	}
+	if got := SizeCollisions(Dialect{S1: 30, S2: 40, S3: 10, S4: 20}); len(got) != 0 {
+		t.Fatalf("false collision %v", got)
+	}
+	if got := SizeCollisions(Compat()); len(got) != 0 {
+		t.Fatalf("compat flagged: %v", got)
+	}
+}
+
+func TestGeneratedDialectsAvoidCollisionsAndFixedWindows(t *testing.T) {
+	oldWindows := [][2]uint32{
+		{100_000_000, 450_000_000},
+		{600_000_000, 950_000_000},
+		{1_100_000_000, 1_450_000_000},
+		{1_600_000_000, 2_050_000_000},
+	}
+	outsideOld := false
+	for i := 0; i < 500; i++ {
+		d, err := GenerateWide()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateProduction(d, DefaultMTU); err != nil {
+			t.Fatalf("generated dialect invalid: %v (%s)", err, Summary(d))
+		}
+		if c := SizeCollisions(d); len(c) != 0 {
+			t.Fatalf("generated dialect has size collisions %v: %s", c, Summary(d))
+		}
+		if d.Jmin < 8 || d.Jmin > 64 || d.Jmax < d.Jmin+32 || d.Jmax > d.Jmin+200 {
+			t.Fatalf("junk bounds: %s", Summary(d))
+		}
+		headers, err := HeaderRanges(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for j, h := range headers {
+			if width := h.End - h.Start; width < minHeaderSpan || width > maxHeaderSpan {
+				t.Fatalf("h%d width %d out of bounds", j+1, width)
+			}
+			if h.Start < oldWindows[j][0] || h.End > oldWindows[j][1] {
+				outsideOld = true
+			}
+		}
+	}
+	if !outsideOld {
+		t.Fatal("headers still come from the fixed windows")
+	}
+}

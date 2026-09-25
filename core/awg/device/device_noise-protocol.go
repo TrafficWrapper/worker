@@ -194,7 +194,7 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
 
 	handshake.mixHash(handshake.remoteStatic[:])
 
-	msgType := device.headers.init.Generate()
+	msgType := device.awgParams().headers.init.Generate()
 
 	msg := MessageInitiation{
 		Type:      msgType,
@@ -370,7 +370,7 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 	}
 
 	var msg MessageResponse
-	msg.Type = device.headers.response.Generate()
+	msg.Type = device.awgParams().headers.response.Generate()
 	msg.Sender = handshake.localIndex
 	msg.Receiver = handshake.remoteIndex
 

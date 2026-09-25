@@ -25,6 +25,7 @@ func run(cfg envConfig) error {
 		return err
 	}
 	checkXHTTPHosts(cfg)
+	checkDialectSizes(cfg, st)
 	var orch *orchClient
 	if cfg.OrchURL != "" {
 		if orch, err = prepareOrchestrator(cfg, st); err != nil {

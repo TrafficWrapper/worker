@@ -145,8 +145,10 @@ func (device *Device) routineRouteListener(_ conn.Bind, netlinkSock int, netlink
 							continue
 						}
 						if nativeEP.DstIP().Is6() || nativeEP.SrcIfidx() == 0 {
+							// Skip this peer only; the rest still need
+							// their routes refreshed.
 							peer.endpoint.Unlock()
-							break
+							continue
 						}
 						nlmsg := struct {
 							hdr     unix.NlMsghdr

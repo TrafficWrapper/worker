@@ -3,10 +3,26 @@ package device
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
 type obfBuilder func(val string) (obf, error)
+
+// maxObfLength bounds a generated part of an obfuscated packet: no packet
+// can carry more, and a negative length would panic when the part is built.
+const maxObfLength = MaxSegmentSize
+
+func parseObfLength(val string) (int, error) {
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 || n > maxObfLength {
+		return 0, fmt.Errorf("length %d out of range [0,%d]", n, maxObfLength)
+	}
+	return n, nil
+}
 
 var obfBuilders = map[string]obfBuilder{
 	"b":  newBytesObf,

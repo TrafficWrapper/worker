@@ -186,6 +186,45 @@ apply_nft_optional() {
   nft add rule inet trafficwrapper_worker input udp dport "$awg_port" counter accept
 }
 
+# verify_release_images checks the cosign signature of every pulled release
+# image by digest, so what runs is exactly what the release workflow signed.
+verify_release_images() {
+  version=$1
+  if ! command -v cosign >/dev/null; then
+    if [ "${ALLOW_UNVERIFIED_IMAGES:-0}" = "1" ]; then
+      echo "WARNING: cosign not found; running release $version without verifying image signatures" >&2
+      return
+    fi
+    echo "cosign is required to verify release images (https://docs.sigstore.dev/cosign/system_config/installation/);" >&2
+    echo "install it, or set ALLOW_UNVERIFIED_IMAGES=1 to skip the check" >&2
+    exit 1
+  fi
+  for image in $($COMPOSE config --images); do
+    case "$image" in
+      ghcr.io/trafficwrapper/worker-*:"$version") ;;
+      *) continue ;;
+    esac
+    ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")
+    cosign verify "$ref" \
+      --certificate-identity-regexp '^https://github.com/TrafficWrapper/worker/.github/workflows/release.yml@refs/tags/v' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+    echo "verified $ref"
+  done
+}
+
+# start_services builds from source unless .env pins a release. A pinned
+# release is pulled and verified, never rebuilt locally under its tag.
+start_services() {
+  version=$(env_value WORKER_VERSION .env)
+  if [ -z "$version" ]; then
+    $COMPOSE up -d --build --wait --wait-timeout "${WAIT_TIMEOUT:-180}"
+    return
+  fi
+  $COMPOSE pull
+  verify_release_images "$version"
+  $COMPOSE up -d --no-build --wait --wait-timeout "${WAIT_TIMEOUT:-180}"
+}
+
 need_tun() {
   [ -c /dev/net/tun ] || {
     echo "missing /dev/net/tun; load the tun kernel module (modprobe tun) or enable TUN for this VPS" >&2
@@ -204,5 +243,5 @@ mkdir -p worker-state
 write_env
 verify_dest_hint
 apply_nft_optional
-$COMPOSE up -d --build --wait --wait-timeout "${WAIT_TIMEOUT:-180}"
+start_services
 $COMPOSE ps

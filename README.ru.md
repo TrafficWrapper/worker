@@ -368,6 +368,12 @@ WORKER_VERSION=v1.2.3 docker compose up -d --no-build --wait
 Без `WORKER_VERSION` compose использует тег `local`, и
 `docker compose up -d --build` собирает из исходников, как раньше.
 
+`install.sh` действует так же: если в `.env` задан `WORKER_VERSION`, он
+скачивает релиз, проверяет подпись каждого образа `worker-*` по digest через
+cosign (см. ниже) и запускает с `--no-build`; без cosign останавливается,
+если не задан `ALLOW_UNVERIFIED_IMAGES=1`. Без `WORKER_VERSION` собирает из
+исходников.
+
 Откат на предыдущий тег (сначала сделайте бэкап, см. выше):
 
 ```sh

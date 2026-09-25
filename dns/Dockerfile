@@ -3,12 +3,11 @@ FROM --platform=$BUILDPLATFORM golang:1.27-bookworm@sha256:69a7b9788769bec032d23
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG DNSPROXY_VERSION=v0.85.0
 
+# dns/go.mod pins dnsproxy, so Dependabot and govulncheck track it.
 WORKDIR /src
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod init dnsbuild \
-    && go get github.com/AdguardTeam/dnsproxy@${DNSPROXY_VERSION}
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \

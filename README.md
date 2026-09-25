@@ -265,7 +265,8 @@ binaries:
 | `XRAY_XHTTP_PATH` | XHTTP path used when `XRAY_NETWORK=xhttp`. | Optional | empty | Operator-chosen path; no public default. |
 | `XRAY_XHTTP_MODE` | XHTTP mode used when `XRAY_NETWORK=xhttp`. | Optional | empty | Passed through to Xray `xhttpSettings.mode`. |
 | `REALITY_MAX_TIME_DIFF` | Seconds a client's REALITY handshake time may differ from the worker clock (Xray `maxTimeDiff`). | Optional | `120` | Rejects replayed ClientHellos; `0` turns the check off (clients with badly wrong clocks). |
-| `XRAY_XHTTP_HOST` | XHTTP Host used when `XRAY_NETWORK=xhttp`. | Optional | `CAMOUFLAGE_DOMAIN` | Override only when the operator route config needs a different XHTTP host. |
+| `XRAY_XHTTP_HOST` | XHTTP Host used when `XRAY_NETWORK=xhttp`. | Optional | `CAMOUFLAGE_DOMAIN` | Override only when the operator route config needs a different XHTTP host. A host other than `CAMOUFLAGE_DOMAIN` is logged and reported as `degraded: xhttp_host`: routes published by the orchestrator use the camouflage domain. |
+| `AWG_INBOUNDS` | AWG profiles as JSON (`name`, `interface`, `listen_port`, `public_port`, `subnet`, `own_dialect`, `min_version_code`, ...). | Optional | one base profile | `min_version_code` is the code derived from the app version name, major*10000+minor*100+patch (0.1.31 → 131), not the Android `versionCode`. See ARCHITECTURE for dialect rotation. |
 | `XRAY_XHTTP_EXTRA_JSON` | Extra XHTTP JSON object. | Optional | empty | Advanced passthrough as `xhttpSettings.extra`; keep empty unless you know the Xray field shape. |
 | `WORKER_STATE_DIR` | Worker state directory inside containers. | Optional | `/var/lib/trafficwrapper-worker` in binaries; Compose uses `/worker-state` | Keep Compose default unless running binaries manually. |
 | `TW_WORKER_DIALECT_JSON` | Advanced override for the AmneziaWG dialect JSON. | Optional | generated dialect | Use only for controlled testing. |

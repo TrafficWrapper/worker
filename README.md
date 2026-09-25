@@ -368,6 +368,12 @@ WORKER_VERSION=v1.2.3 docker compose up -d --no-build --wait
 Without `WORKER_VERSION` the compose file falls back to the `local` tag and
 `docker compose up -d --build` builds from source as before.
 
+`install.sh` follows the same rule: with `WORKER_VERSION` set in `.env` it
+pulls the release, verifies every `worker-*` image signature by digest with
+cosign (see below) and starts it with `--no-build`; it stops if cosign is
+missing unless `ALLOW_UNVERIFIED_IMAGES=1`. Without `WORKER_VERSION` it builds
+from source.
+
 Rollback to the previous tag (take a backup first, see above):
 
 ```sh

@@ -6,14 +6,13 @@ updates:
       - /awg-gw
       - /awg-smoke
       - /core
+      - /dns
     schedule:
       interval: weekly
     ignore:
       # core/awg/device is vendored from amneziawg-go v0.2.18 and builds only
-      # with the pinned amneziawg-go pseudo-version and gvisor; upgrade them
-      # together by hand.
+      # with the pinned amneziawg-go pseudo-version; upgrade it by hand.
       - dependency-name: github.com/amnezia-vpn/amneziawg-go
-      - dependency-name: gvisor.dev/gvisor
 
   - package-ecosystem: docker
     directories:

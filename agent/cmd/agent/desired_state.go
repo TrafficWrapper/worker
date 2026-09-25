@@ -190,3 +190,18 @@ func cachedDesiredState(stateDir string) desiredState {
 	}
 	return ds
 }
+
+// expiredSince reports whether a device the config still lists expired in
+// (since, now]. The worker then drops it right away instead of waiting for
+// the next config from the orchestrator.
+func (d desiredState) expiredSince(since, now time.Time) bool {
+	if d.revoked {
+		return false
+	}
+	for _, device := range d.devices {
+		if expiresAt, ok := approvedDeviceExpiry(device); ok && expiresAt.After(since) && !expiresAt.After(now) {
+			return true
+		}
+	}
+	return false
+}

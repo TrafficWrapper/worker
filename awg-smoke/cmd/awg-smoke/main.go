@@ -257,8 +257,34 @@ func deviceStats(dev *device.Device) (string, error) {
 	return out.String(), nil
 }
 
+// parseSmokeIP accepts the smoke client address either bare ("10.13.13.2",
+// as documented for AWG_CLIENT_IP) or as a single-host prefix
+// ("10.13.13.2/32", as stored in state) and returns it as a single-host
+// prefix. Prefixes wider than one host are rejected.
+func parseSmokeIP(value string) (netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	if !strings.Contains(value, "/") {
+		addr, err := netip.ParseAddr(value)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("smoke_ip %q: %w", value, err)
+		}
+		if addr.Zone() != "" {
+			return netip.Prefix{}, fmt.Errorf("smoke_ip %q: zones are not allowed", value)
+		}
+		return netip.PrefixFrom(addr, addr.BitLen()), nil
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("smoke_ip %q: %w", value, err)
+	}
+	if !prefix.IsSingleIP() {
+		return netip.Prefix{}, fmt.Errorf("smoke_ip %q must be a single host (/%d)", value, prefix.Addr().BitLen())
+	}
+	return prefix, nil
+}
+
 func smokeInterfacePrefix(smokeIP string) (string, error) {
-	prefix, err := netip.ParsePrefix(smokeIP)
+	prefix, err := parseSmokeIP(smokeIP)
 	if err != nil {
 		return "", err
 	}

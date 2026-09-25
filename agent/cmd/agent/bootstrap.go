@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,14 @@ func bootstrap(cfg envConfig) (stateFile, error) {
 		return stateFile{}, err
 	}
 	path := filepath.Join(cfg.StateDir, "bootstrap.json")
+	if raw, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(raw))) == 0 {
+		// An empty file holds no keys to keep; starting over beats a
+		// crash loop on "parse bootstrap state".
+		slog.Warn("bootstrap state is empty; generating a new one", "path", path)
+		if err := os.Remove(path); err != nil {
+			return stateFile{}, err
+		}
+	}
 	if raw, err := os.ReadFile(path); err == nil {
 		var st stateFile
 		if err := json.Unmarshal(raw, &st); err != nil {

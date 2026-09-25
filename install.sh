@@ -49,6 +49,21 @@ pick_udp_port() {
   exit 1
 }
 
+# is_global_ip succeeds for a global unicast address only.
+is_global_ip() {
+  python3 - "$1" <<'PY'
+import ipaddress, sys
+try:
+    sys.exit(0 if ipaddress.ip_address(sys.argv[1].strip()).is_global else 1)
+except ValueError:
+    sys.exit(1)
+PY
+}
+
+# detect_ip prints the public egress IPv4 only when it is global and either
+# confirmed by two echo services or read from WAN_IF. Otherwise it prints
+# nothing: .env keeps EGRESS_IP empty and the agent detects it at runtime,
+# instead of pinning a guess (such as a LAN address) forever.
 detect_ip() {
   if [ -n "${EGRESS_IP:-}" ]; then echo "$EGRESS_IP"; return; fi
   tmp=$(mktemp)
@@ -58,12 +73,14 @@ detect_ip() {
     printf '\n' >>"$tmp"
   done
   ip=$(awk 'NF && $1 ~ /^[0-9.]+$/ {c[$1]++} END{for (i in c) if (c[i] >= 2) {print i; exit}}' "$tmp")
-  if [ -n "$ip" ]; then echo "$ip"; return; fi
-  if [ -n "${WAN_IF:-}" ]; then
-    ip -4 addr show dev "$WAN_IF" | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}'
+  if [ -z "$ip" ] && [ -n "${WAN_IF:-}" ]; then
+    ip=$(ip -4 addr show dev "$WAN_IF" | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}')
+  fi
+  if [ -n "$ip" ] && is_global_ip "$ip"; then
+    echo "$ip"
     return
   fi
-  hostname -I | awk '{print $1}'
+  echo "WARNING: no confirmed global egress IP; leaving EGRESS_IP empty for the agent to detect" >&2
 }
 
 # detect_ipv6 asks from the host: containers on the default Compose network
@@ -114,6 +131,10 @@ write_env() {
   gateway=${AWG_GATEWAY:-$(env_value AWG_GATEWAY "$previous")}
   gateway=${gateway:-$(first_host "$subnet")}
   egress=${EGRESS_IP:-$(env_value EGRESS_IP "$previous")}
+  # A non-global value from an older install (e.g. hostname -I) is dropped.
+  if [ -n "$egress" ] && [ -z "${EGRESS_IP:-}" ] && ! is_global_ip "$egress"; then
+    egress=""
+  fi
   egress=${egress:-$(detect_ip)}
   camouflage=${CAMOUFLAGE_DOMAIN:-$(env_value CAMOUFLAGE_DOMAIN "$previous")}
   v6=${PUBLIC_ADDRESS_V6:-$(env_value PUBLIC_ADDRESS_V6 "$previous")}

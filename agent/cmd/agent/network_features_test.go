@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/TrafficWrapper/worker/core/awg/dialect"
 )
 
 func TestPublicAddressV6Validation(t *testing.T) {
@@ -89,5 +91,21 @@ func TestPublicAddressV6AutoWarnsWhenNothingFound(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "PUBLIC_ADDRESS_V6=auto") {
 		t.Fatalf("no warning logged: %s", logs.String())
+	}
+}
+
+func TestStoredDialectSizeCollisionIsReported(t *testing.T) {
+	t.Cleanup(func() { dialectSizeCollision.Store(false) })
+	cfg := envConfig{AWGProfiles: []awgInboundProfile{{Name: "awg", Interface: "awg1", ListenPort: 51821, PublicPort: 51888, Subnet: "10.13.13.0/24", Gateway: "10.13.13.1"}}}
+	st := hardeningTestState()
+	st.Dialect = dialect.Dialect{Jc: 4, Jmin: 8, Jmax: 50, S1: 30, S2: 24, S3: 10, S4: 20, H1: "100-200", H2: "300-400", H3: "500-600", H4: "700-800"}
+	checkDialectSizes(cfg, st)
+	if !strings.Contains(selfCheckStatus(), "dialect") {
+		t.Fatalf("self_check %q", selfCheckStatus())
+	}
+	st.Dialect.S2 = 40
+	checkDialectSizes(cfg, st)
+	if strings.Contains(selfCheckStatus(), "dialect") {
+		t.Fatal("clean dialect reported")
 	}
 }

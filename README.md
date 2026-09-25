@@ -184,8 +184,8 @@ Edit `.env`:
 - `PUBLIC_ADDRESS`: public DNS name or IP of this worker.
 - `CAMOUFLAGE_DOMAIN`: a real TLS 1.3 SNI/fallback domain for REALITY. Empty
   values and `example.com`/`example.org` are refused.
-- `WAN_IF`: egress interface if you enable nft NAT automation.
-- `APPLY_NFT=1`: only after reviewing the generated NAT/firewall rules.
+- `WAN_IF`: egress interface `install.sh` reads the public IP from when public
+  lookups disagree.
 
 Start:
 
@@ -207,8 +207,7 @@ TCP/UDP ports manually, and running `docker compose up -d --build` is enough.
 - pick free ports: 443 for REALITY when free, otherwise random ones (or from
   `REALITY_PORT_POOL` / `AWG_PORT_POOL` when set);
 - detect the WAN interface and public egress;
-- write `.env` values;
-- when `APPLY_NFT=1`, install nft accept/NAT rules for the selected ports.
+- write `.env` values.
 
 Run it with a real camouflage value, for example:
 
@@ -216,7 +215,11 @@ Run it with a real camouflage value, for example:
 CAMOUFLAGE_DOMAIN=www.your-real-tls13-domain.tld ./install.sh
 ```
 
-Keep `APPLY_NFT=0` until you review the generated firewall/NAT changes.
+`install.sh` does not change the host firewall. Docker publishes `XRAY_PORT`/tcp
+and `AWG_PORT`/udp itself and NATs them past the `INPUT` chain, so allow or
+restrict those ports in Docker's `DOCKER-USER` chain (or your cloud firewall).
+The former `APPLY_NFT` option is retired: `install.sh` stops with an error when
+`APPLY_NFT=1` is set.
 
 ## Environment Variables
 
@@ -241,7 +244,7 @@ binaries:
 | `WORKER_BLOCK_SMTP` | Blocks outbound mail ports 25/465/587 for clients (Xray and AWG). | Optional | `1` | Keep `1`: spam from a worker IP gets the host blacklisted. |
 | `WORKER_BLOCK_BITTORRENT` | Blocks BitTorrent for REALITY clients (enables Xray sniffing with `routeOnly`). | Optional | `1` | Keep `1` to avoid DMCA notices to the hosting provider. |
 | `REALITY_PROBE_ADDR` | Address the agent uses to probe its own REALITY listener like a censor without a client key. | Optional | `xray:8443` | Keep the Compose default. |
-| `WORKER_ALLOW_PRIVATE_EGRESS` | Lets VPN clients reach private, loopback, link-local (cloud metadata) and Docker-internal addresses through the worker. | Optional | `0` | Keep `0`: both Xray routing and the `awg-gw` forward filter block those ranges. |
+| `WORKER_ALLOW_PRIVATE_EGRESS` | Lets VPN clients reach private, loopback, link-local (cloud metadata) and Docker-internal addresses, and the worker's own public addresses, through the worker. | Optional | `0` | Keep `0`: both Xray routing and the `awg-gw` forward filter block those ranges. |
 | `WORKER_SMOKE_PEERS` | Built-in smoke credentials (`p0-smoke` REALITY user and AWG smoke peer). | Optional | enabled standalone, disabled with `ORCH_URL` | `1` to keep them on an orchestrated worker for `awg-smoke`, `0` to disable. |
 | `XRAY_PORT` | Public TCP port mapped to the REALITY container. | Optional | chosen by `install.sh` (Compose fallback `2053`) | `install.sh` takes 443 when free, otherwise a random port in 20000-59999, and keeps it on re-runs. |
 | `AWG_PORT` | Public UDP port mapped to AWG. | Optional | chosen by `install.sh` (Compose fallback `51888`) | A random free UDP port in 20000-59999, kept on re-runs. |
@@ -271,7 +274,6 @@ binaries:
 | `WORKER_STATE_DIR` | Worker state directory inside containers. | Optional | `/var/lib/trafficwrapper-worker` in binaries; Compose uses `/worker-state` | Keep Compose default unless running binaries manually. |
 | `TW_WORKER_DIALECT_JSON` | Advanced override for the AmneziaWG dialect JSON. | Optional | generated dialect | Use only for controlled testing. |
 | `WAN_IF` | Interface used by `install.sh` to detect egress IP. | Optional | auto-detect | `eth0`, `ens3`, etc. |
-| `APPLY_NFT` | Enables install-time nft accept rules for selected ports. | Optional | `0` | Set `1` only after reviewing rules. |
 | `EGRESS_VIA_WG` | Reserved deployment hint in `.env.example`; not consumed by current binaries. | Optional | empty | Leave empty unless you extend deployment scripts. |
 | `COMPOSE` | Compose command used by `install.sh`/`uninstall.sh`. | Optional | `docker compose` | `docker-compose` on older hosts. |
 | `REALITY_PORT_POOL` | TCP ports `install.sh` may choose from. | Optional | 443, then random | Quoted space-separated list, only to pin the choice. |
@@ -316,8 +318,9 @@ sudo tar -czf worker-backup-$(date -u +%Y%m%dT%H%M%SZ).tgz worker-state .env
 
 `./uninstall.sh` writes the same archive (`worker-state-backup-<UTC>.tgz`)
 before deleting state. Flags: `--yes` (no prompt, required without a TTY),
-`--keep-state`, `--purge-images` (also removes locally built images and the
-`awg-run` volume).
+`--keep-state`, `--purge-images` (also removes the `worker-*` images, built or
+pulled, and the named volumes). If `docker compose down` fails, it stops with
+an error and deletes nothing.
 
 Move a worker to another host: stop it (`docker compose down`), copy the
 archive, clone the same release on the new host, extract the archive into the
@@ -409,8 +412,8 @@ inspected with `docker buildx imagetools inspect <image> --format '{{ json .Prov
   artifacts.
 - Use a unique deployment dialect; the worker state is generated locally.
 - Clients cannot reach private, loopback, link-local or Docker-internal
-  addresses through the worker (agent API, `/metrics`, the host, cloud metadata)
-  unless `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray drops private answers from DNS
+  addresses, or the worker's own public addresses, through the worker (agent
+  API, `/metrics`, the host, cloud metadata) unless `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray drops private answers from DNS
   and dials the address it resolved itself (IPv4 only), so a name cannot switch
   to a private address between the routing check and the connection.
 - When the orchestrator switches a protocol off (`desired_state.reality.enabled`
@@ -418,8 +421,8 @@ inspected with `docker buildx imagetools inspect <image> --format '{{ json .Prov
   When it revokes the worker, the agent removes all device users and peers,
   restarts Xray to end open sessions, deletes the published client config and
   APKs, and asks again only hourly.
-- Keep `APPLY_NFT=0` while testing. Review firewall/NAT rules before enabling it
-  on a production server.
+- Filter the published ports in the `DOCKER-USER` chain, not `INPUT`: Docker
+  forwards published ports before `INPUT` rules see them.
 - Worker enrollment tokens are one-time secrets; create them in the orchestrator
   and do not store them in Git.
 

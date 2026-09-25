@@ -1,10 +1,14 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -137,5 +141,61 @@ func TestParseLogLevelAndAckInterval(t *testing.T) {
 	t.Setenv("ORCH_ACK_INTERVAL", "1s")
 	if _, err := readEnv(); err == nil {
 		t.Fatal("too short ack interval accepted")
+	}
+}
+
+func TestCreateFileExclusiveWithoutHardLinks(t *testing.T) {
+	old := linkFile
+	linkFile = func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
+	t.Cleanup(func() { linkFile = old })
+	path := filepath.Join(t.TempDir(), "bootstrap.json")
+	if err := createFileExclusive(path, []byte(`{"a":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != `{"a":1}` {
+		t.Fatalf("content %q", raw)
+	}
+	if err := createFileExclusive(path, []byte(`{"b":2}`), 0o600); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("second writer not refused: %v", err)
+	}
+	if raw, _ := os.ReadFile(path); string(raw) != `{"a":1}` {
+		t.Fatal("first writer's file replaced")
+	}
+	// A lock left by a crashed writer is broken once it is stale.
+	other := filepath.Join(filepath.Dir(path), "other.json")
+	if err := os.WriteFile(other+".lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old2 := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(other+".lock", old2, old2); err != nil {
+		t.Fatal(err)
+	}
+	if err := createFileExclusive(other, []byte("x"), 0o600); err != nil {
+		t.Fatalf("stale lock not broken: %v", err)
+	}
+	if fileExists(other + ".lock") {
+		t.Fatal("lock left behind")
+	}
+}
+
+func TestBootstrapRecoversFromEmptyState(t *testing.T) {
+	cfg := envConfig{
+		StateDir:         t.TempDir(),
+		AWGSubnet:        "10.13.13.0/24",
+		AWGGateway:       "10.13.13.1",
+		CamouflageDomain: "www.example.net",
+		RealityDest:      "www.example.net:443",
+		EgressIP:         "203.0.113.10",
+		PublicAddress:    "203.0.113.10",
+	}
+	if err := os.WriteFile(filepath.Join(cfg.StateDir, "bootstrap.json"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := bootstrap(cfg)
+	if err != nil {
+		t.Fatalf("empty bootstrap state not recovered: %v", err)
+	}
+	if st.Reality.PrivateKey == "" {
+		t.Fatal("no state generated")
 	}
 }

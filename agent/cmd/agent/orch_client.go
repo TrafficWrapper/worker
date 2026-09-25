@@ -194,6 +194,10 @@ const (
 	orchRevokedRetry = time.Hour
 )
 
+// deviceExpiryCheckInterval is how often the loop looks for devices whose
+// expires_at has passed.
+var deviceExpiryCheckInterval = 30 * time.Second
+
 // backoff is an exponential delay with full jitter, reset after success.
 type backoff struct {
 	min, max, current time.Duration
@@ -233,6 +237,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 	// cut a file write short.
 	defer apk.wait()
 	var lastAck, lastPull, nextPullAt, nextApplyRetryAt time.Time
+	lastExpiryCheck := platformNow()
 	pullNeeded := true
 	// A failed state write is retried on every pass: losing the worker ID or
 	// applied seq would mean a new enrollment or a full re-apply later.
@@ -344,6 +349,19 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				pullRetry.reset()
 				continue
 			}
+		}
+		// Device expiry is enforced locally, not only when a new config
+		// arrives: re-apply the cached config when a listed device expires.
+		if now := platformNow(); now.Sub(lastExpiryCheck) >= deviceExpiryCheckInterval {
+			if cachedDesiredState(cfg.StateDir).expiredSince(lastExpiryCheck, now) {
+				slog.Info("approved device expired; removing it")
+				if err := reapplyCachedDesiredState(cfg, st); err != nil {
+					slog.Warn("removing expired device failed; retrying", "err", err)
+					setApplyIncomplete(true)
+					nextApplyRetryAt = time.Now().Add(applyRetry.next())
+				}
+			}
+			lastExpiryCheck = now
 		}
 		if applyIncomplete() && !time.Now().Before(nextApplyRetryAt) {
 			if err := reapplyCachedDesiredState(cfg, st); err != nil {

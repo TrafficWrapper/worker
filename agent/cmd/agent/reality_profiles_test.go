@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,5 +124,50 @@ func TestAWGProfileOwnDialectIsGeneratedOnceAndAdvertised(t *testing.T) {
 	}
 	if profileDialectID(st, cfg.AWGProfiles[1]) == profileDialectID(st, cfg.AWGProfiles[0]) {
 		t.Fatal("profile dialect id not distinct")
+	}
+}
+
+func TestBaseShortIDCannotBeRevoked(t *testing.T) {
+	st := stateFile{Reality: realityState{ShortID: "abcd"}}
+	ensureRealityCohorts(&st)
+	ids := realityShortIDs(st, []string{"ABCD", st.Reality.CohortShortIDs[0]})
+	if len(ids) == 0 || ids[0] != "abcd" || containsString(ids, st.Reality.CohortShortIDs[0]) {
+		t.Fatalf("short ids=%v", ids)
+	}
+}
+
+func TestXrayConfigWithoutShortIDsIsNeverWritten(t *testing.T) {
+	t.Cleanup(func() { xrayConfigRejected.Store(false) })
+	cfg := envConfig{StateDir: t.TempDir(), RealityDest: "www.example.net:443", CamouflageDomain: "www.example.net", DisableSmokePeers: true}
+	good := hardeningTestState()
+	good.Reality.CohortShortIDs = []string{"c1"}
+	if err := renderXray(cfg, good); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := os.ReadFile(xrayConfigPath(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every short ID gone: no base and the only cohort revoked.
+	broken := good
+	broken.Reality.ShortID = ""
+	if err := writeFile(filepath.Join(cfg.StateDir, "orch", "worker-config.json"), []byte(`{"desired_state":{"approved_devices":[],"revoked_short_ids":["c1"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := xrayConfigBytes(cfg, broken, nil); !errors.Is(err, errNoShortIDs) {
+		t.Fatalf("empty shortIds rendered: %v", err)
+	}
+	if err := renderXray(cfg, broken); err != nil {
+		t.Fatalf("startup render must keep going: %v", err)
+	}
+	if err := applyDesiredState(cfg, broken, desiredState{realityEnabled: true, awgEnabled: true}); err == nil {
+		t.Fatal("apply with empty shortIds reported success")
+	}
+	now, _ := os.ReadFile(xrayConfigPath(cfg))
+	if string(now) != string(valid) {
+		t.Fatal("last valid xray config replaced")
+	}
+	if !strings.Contains(selfCheckStatus(), "xray_config") {
+		t.Fatalf("self_check %q does not report the refused config", selfCheckStatus())
 	}
 }

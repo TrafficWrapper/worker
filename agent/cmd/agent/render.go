@@ -39,8 +39,22 @@ func renderAll(cfg envConfig, st stateFile) error {
 	return nil
 }
 
+// renderXray brings Xray in line with the current settings and the cached
+// device list at startup. It always goes through applyXrayConfig, so a
+// changed .env (camouflage domain, dest, XHTTP, egress policy) reaches the
+// running Xray even when there are no devices yet.
 func renderXray(cfg envConfig, st stateFile) error {
-	devices := cachedDesiredState(cfg.StateDir).realityDevices(platformNow())
+	ds, cachedErr := loadCachedDesiredState(cfg.StateDir)
+	var devices []approvedDevice
+	if cachedErr == nil {
+		devices = ds.realityDevices(platformNow())
+	}
+	// The same anti-wipe rule as for AWG: an unreadable cache, or an empty
+	// list nobody asked for, must not remove every REALITY user.
+	if orchAppliedSeq(cfg.StateDir) > 0 && (cachedErr != nil || (len(devices) == 0 && !ds.realityIntentionallyEmpty())) {
+		slog.Warn("xray render skipped by anti-wipe guard", "err", cachedErr)
+		return nil
+	}
 	xrayRaw, err := xrayConfigBytes(cfg, st, devices)
 	if errors.Is(err, errNoShortIDs) {
 		// Keep whatever Xray runs now rather than a config it rejects.
@@ -49,12 +63,6 @@ func renderXray(cfg envConfig, st stateFile) error {
 	}
 	if err != nil {
 		return err
-	}
-	if len(devices) == 0 && !xrayRestartPending(cfg) {
-		if !xrayConfigChanged(cfg, xrayRaw) {
-			return nil
-		}
-		return writeXrayConfigBytes(cfg, xrayRaw)
 	}
 	return applyXrayConfig(cfg, xrayRaw, len(devices))
 }

@@ -110,7 +110,7 @@ func collectAWGProfilePeerSnapshots(cfg envConfig) []awgProfilePeerSnapshot {
 // the orchestrator switched off, or a revoked worker, gets no device
 // credentials; Xray still starts with the remaining inbound users.
 func applyDesiredState(cfg envConfig, st stateFile, ds desiredState) error {
-	now := time.Now().UTC()
+	now := platformNow()
 	realityDevices := ds.realityDevices(now)
 	awgDevices := ds.awgDevices(now)
 	xrayRaw, err := xrayConfigBytes(cfg, st, realityDevices)
@@ -266,7 +266,7 @@ func writeAWGPeerRegistryForProfile(cfg envConfig, st stateFile, devices []appro
 }
 
 func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, profile awgInboundProfile, includeSmoke bool) (awgPeerRegistry, []awgDesiredPeer) {
-	now := time.Now().UTC()
+	now := platformNow()
 	expires := time.Now().UTC().Add(3650 * 24 * time.Hour)
 	clients := []awgPeerRegistryClient{}
 	desired := []awgDesiredPeer{}
@@ -481,7 +481,7 @@ func reconcileAWGPeers(cfg envConfig, st stateFile) error {
 	if err != nil {
 		return fmt.Errorf("AWG reconcile skipped by anti-wipe guard: %w", err)
 	}
-	devices := ds.awgDevices(time.Now().UTC())
+	devices := ds.awgDevices(platformNow())
 	if orchAppliedSeq(cfg.StateDir) > 0 && len(devices) == 0 && !ds.awgIntentionallyEmpty() {
 		return errors.New("AWG reconcile skipped by anti-wipe guard: applied worker config has no approved devices")
 	}

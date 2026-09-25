@@ -40,7 +40,7 @@ func renderAll(cfg envConfig, st stateFile) error {
 }
 
 func renderXray(cfg envConfig, st stateFile) error {
-	devices := cachedDesiredState(cfg.StateDir).realityDevices(time.Now().UTC())
+	devices := cachedDesiredState(cfg.StateDir).realityDevices(platformNow())
 	xrayRaw, err := xrayConfigBytes(cfg, st, devices)
 	if err != nil {
 		return err
@@ -64,7 +64,7 @@ func renderAWG(cfg envConfig, st stateFile) error {
 			skipRegistryWrite = true
 		}
 	} else {
-		devices = ds.awgDevices(time.Now().UTC())
+		devices = ds.awgDevices(platformNow())
 		if orchAppliedSeq(cfg.StateDir) > 0 && len(devices) == 0 && !ds.awgIntentionallyEmpty() {
 			slog.Warn("awg registry render skipped by anti-wipe guard: applied worker config has no approved devices")
 			skipRegistryWrite = true

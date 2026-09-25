@@ -66,6 +66,7 @@ type orchEnrollRequest struct {
 type orchEnrollResponse struct {
 	OK              bool   `json:"ok"`
 	Error           string `json:"error,omitempty"`
+	Code            string `json:"code,omitempty"`
 	WorkerID        string `json:"worker_id,omitempty"`
 	Status          string `json:"status,omitempty"`
 	SignerPublicKey string `json:"signer_public_key,omitempty"`
@@ -220,7 +221,23 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 	retry := newBackoff(orchBackoffMin, orchBackoffMax)
 	var lastAck, lastPull time.Time
 	pullNeeded := true
+	// A failed state write is retried on every pass: losing the worker ID or
+	// applied seq would mean a new enrollment or a full re-apply later.
+	stateDirty := false
+	persist := func(s orchState) {
+		if err := saveOrchState(cfg.StateDir, s); err != nil {
+			if !stateDirty {
+				slog.Error("orch state not saved; retrying", "err", err)
+			}
+			stateDirty = true
+			return
+		}
+		stateDirty = false
+	}
 	for ctx.Err() == nil {
+		if stateDirty {
+			persist(state)
+		}
 		if state.WorkerID == "" {
 			resp, err := client.enroll(ctx, cfg.EnrollToken, selfDescribe(cfg, st))
 			recordOrchRequest("enroll", err)
@@ -232,7 +249,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			state.WorkerID = resp.WorkerID
 			state.Status = resp.Status
 			state.SignerPublicKey = resp.SignerPublicKey
-			_ = saveOrchState(cfg.StateDir, state)
+			persist(state)
 			slog.Info("orch enroll", "status", state.Status, "worker_id", state.WorkerID)
 		}
 		if pullNeeded || time.Since(lastPull) >= orchForcedPullInterval {
@@ -254,7 +271,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 					continue
 				}
 				state.Status = pull.Status
-				_ = saveOrchState(cfg.StateDir, state)
+				persist(state)
 				slog.Warn("orch pull pending/error", "status", pull.Status, "error", pull.Error)
 				sleepCtx(ctx, retry.next())
 				continue
@@ -265,7 +282,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				slog.Warn("orch reports the worker is no longer revoked; re-pulling the full config", "status", pull.Status)
 				state.Status = pull.Status
 				state.AppliedSeq = 0
-				_ = saveOrchState(cfg.StateDir, state)
+				persist(state)
 				continue
 			}
 			state.Status = pull.Status
@@ -280,7 +297,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				}
 				state.AppliedSeq = seq
 				state.ClientAppliedSeq = clientSeq
-				_ = saveOrchState(cfg.StateDir, state)
+				persist(state)
 				orchAppliedSeqGauge.Store(seq)
 				if orchDesiredSeqGauge.Load() < seq {
 					orchDesiredSeqGauge.Store(seq)
@@ -291,7 +308,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				retry.reset()
 				continue
 			}
-			_ = saveOrchState(cfg.StateDir, state)
+			persist(state)
 			pullNeeded = false
 			retry.reset()
 		}
@@ -304,8 +321,13 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			sleepCtx(ctx, retry.next())
 			continue
 		}
-		if !nudge.OK && orchRevoked(nudge.Status, nudge.Code) {
+		if !nudge.OK {
 			pullNeeded = true
+			if orchRevoked(nudge.Status, nudge.Code) {
+				continue
+			}
+			slog.Warn("orch nudge rejected", "status", nudge.Status, "code", nudge.Code, "error", nudge.Error)
+			sleepCtx(ctx, retry.next())
 			continue
 		}
 		retry.reset()
@@ -339,7 +361,7 @@ func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st st
 	if ds.revoked {
 		approvedDevicesGauge.Store(0)
 	} else {
-		approvedDevicesGauge.Store(int64(len(filterUnexpiredApprovedDevices(ds.devices, time.Now().UTC()))))
+		approvedDevicesGauge.Store(int64(len(filterUnexpiredApprovedDevices(ds.devices, platformNow()))))
 	}
 	usage := collectWorkerUsageReports(cfg, ds)
 	ack, err := client.ack(ctx, orchAckRequest{
@@ -488,6 +510,9 @@ func newOrchClient(cfg envConfig, st stateFile) (*orchClient, error) {
 func (c *orchClient) enroll(ctx context.Context, token string, self map[string]any) (orchEnrollResponse, error) {
 	var resp orchEnrollResponse
 	err := c.noiseCall(ctx, "/w/v1/enroll", orchEnrollRequest{Token: token, WorkerStaticPub: protocol.KeyToBase64(c.staticKey.Public), SelfDescribe: self}, &resp)
+	if err == nil && (!resp.OK || resp.WorkerID == "") {
+		err = &orchRejectedError{status: resp.Status, code: resp.Code, message: "enroll rejected: " + resp.Error}
+	}
 	return resp, err
 }
 
@@ -520,8 +545,10 @@ func (c *orchClient) nudge(ctx context.Context, workerID string, have int64, sel
 
 func (c *orchClient) telemetry(ctx context.Context, workerID string, payload []byte, headers map[string]string) error {
 	var resp struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error,omitempty"`
+		OK     bool   `json:"ok"`
+		Error  string `json:"error,omitempty"`
+		Status string `json:"status,omitempty"`
+		Code   string `json:"code,omitempty"`
 	}
 	err := c.noiseCall(ctx, "/w/v1/telemetry", orchTelemetryRequest{
 		WorkerID:      workerID,
@@ -533,7 +560,7 @@ func (c *orchClient) telemetry(ctx context.Context, workerID string, payload []b
 		return err
 	}
 	if !resp.OK {
-		return errors.New(resp.Error)
+		return &orchRejectedError{status: resp.Status, code: resp.Code, message: resp.Error}
 	}
 	return nil
 }
@@ -559,7 +586,7 @@ func (c *orchClient) noiseCall(ctx context.Context, path string, req any, resp a
 		return err
 	}
 	if !start.OK {
-		return errors.New(start.Error)
+		return &orchUnavailableError{message: start.Error}
 	}
 	msg2, err := base64.StdEncoding.DecodeString(start.Message)
 	if err != nil {
@@ -581,13 +608,23 @@ func (c *orchClient) noiseCall(ctx context.Context, path string, req any, resp a
 		return err
 	}
 	if !envResp.OK {
-		return errors.New(envResp.Error)
+		return &orchUnavailableError{message: envResp.Error}
 	}
 	encrypted, err := base64.StdEncoding.DecodeString(envResp.Payload)
 	if err != nil {
 		return err
 	}
-	return protocol.DecryptJSON(recvCipher, encrypted, resp)
+	plain, err := recvCipher.Decrypt(nil, nil, encrypted)
+	if err != nil {
+		return err
+	}
+	var meta struct {
+		ServerTime int64 `json:"server_time"`
+	}
+	if json.Unmarshal(plain, &meta) == nil {
+		observeServerTime(meta.ServerTime, time.Now())
+	}
+	return json.Unmarshal(plain, resp)
 }
 
 func (c *orchClient) postJSON(ctx context.Context, path string, req any, resp any) error {
@@ -607,7 +644,7 @@ func (c *orchClient) postJSON(ctx context.Context, path string, req any, resp an
 	defer httpResp.Body.Close()
 	if httpResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 4096))
-		return fmt.Errorf("http %d: %s", httpResp.StatusCode, strings.TrimSpace(string(body)))
+		return &orchUnavailableError{httpStatus: httpResp.StatusCode, message: fmt.Sprintf("http %d: %s", httpResp.StatusCode, strings.TrimSpace(string(body)))}
 	}
 	// Decode straight from the stream: pull responses can carry an APK, and
 	// buffering the raw body first would hold one more full copy in memory.
@@ -827,3 +864,20 @@ func orchestratorHasCapability(name string) bool {
 	}
 	return false
 }
+
+// orchRejectedError is an ok:false answer the orchestrator decided on, with
+// its optional structured code.
+type orchRejectedError struct {
+	status, code, message string
+}
+
+func (e *orchRejectedError) Error() string { return e.message }
+
+// orchUnavailableError is a failure before the orchestrator looked at the
+// request: an HTTP error status or a refused handshake.
+type orchUnavailableError struct {
+	httpStatus int
+	message    string
+}
+
+func (e *orchUnavailableError) Error() string { return e.message }

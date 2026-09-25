@@ -112,7 +112,8 @@ services:
     mem_limit: 128m
     pids_limit: 256
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      # Healthy only inside the namespace that has the tunnel gateway.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz && ip addr | grep -q \"$${AWG_GATEWAY}/\""]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -129,6 +130,7 @@ services:
         condition: service_healthy
     network_mode: "service:awg-gw"
     environment:
+      AWG_GATEWAY: ${AWG_GATEWAY:-10.13.13.1}
       DNS_UPSTREAMS: ${DNS_UPSTREAMS:-https://dns.quad9.net/dns-query https://cloudflare-dns.com/dns-query}
       DNS_BOOTSTRAP: ${DNS_BOOTSTRAP:-9.9.9.9:53}
     cap_drop:
@@ -139,7 +141,9 @@ services:
     mem_limit: 128m
     pids_limit: 128
     healthcheck:
-      test: ["CMD", "nslookup", "localhost", "127.0.0.1"]
+      # Ask on the tunnel gateway address, which exists only inside the
+      # namespace AWG clients use.
+      test: ["CMD-SHELL", "nslookup localhost \"$${AWG_GATEWAY}\""]
       interval: 30s
       timeout: 5s
       retries: 3

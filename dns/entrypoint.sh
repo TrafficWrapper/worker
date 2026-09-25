@@ -17,4 +17,28 @@ for upstream in ${DNS_UPSTREAMS:-https://dns.quad9.net/dns-query https://cloudfl
   set -- "$@" --upstream="$upstream"
 done
 
-exec /usr/local/bin/dnsproxy "$@"
+/usr/local/bin/dnsproxy "$@" &
+dns_pid=$!
+trap 'kill -TERM "$dns_pid" 2>/dev/null' TERM INT
+
+# This container shares the awg-gw network namespace. When awg-gw restarts it
+# gets a new one and this container is left in the old namespace without the
+# tunnel. Exit then, so Docker restarts it inside the current one.
+AWG_GATEWAY="${AWG_GATEWAY:-10.13.13.1}"
+missing=0
+while kill -0 "$dns_pid" 2>/dev/null; do
+  sleep 10 &
+  wait $! 2>/dev/null || true
+  if ip addr | grep -q "${AWG_GATEWAY}/"; then
+    missing=0
+  else
+    missing=$((missing + 1))
+  fi
+  if [ "$missing" -ge 3 ]; then
+    echo "tunnel gateway ${AWG_GATEWAY} is gone from this network namespace; restarting" >&2
+    kill -TERM "$dns_pid" 2>/dev/null || true
+    wait "$dns_pid" 2>/dev/null || true
+    exit 1
+  fi
+done
+wait "$dns_pid"

@@ -287,7 +287,7 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 			PSK2:      st.AWG.SmokePSK,
 			AllowedIP: st.AWG.SmokeIP,
 		})
-		seen[st.AWG.SmokePublic] = struct{}{}
+		seen[awgKeyIdentity(st.AWG.SmokePublic)] = struct{}{}
 		seenIPs[st.AWG.SmokeIP] = struct{}{}
 	}
 	for _, device := range devices {
@@ -295,7 +295,8 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 		if !ok {
 			continue
 		}
-		if _, ok := seen[creds.AWGPublicKey]; ok {
+		keyID := awgKeyIdentity(creds.AWGPublicKey)
+		if _, ok := seen[keyID]; ok {
 			continue
 		}
 		if _, ok := seenIPs[creds.InternalIP]; ok {
@@ -316,7 +317,7 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 			}
 			deviceExpires = parsed
 		}
-		seen[creds.AWGPublicKey] = struct{}{}
+		seen[keyID] = struct{}{}
 		seenIPs[creds.InternalIP] = struct{}{}
 		clients = append(clients, awgPeerRegistryClient{
 			WGPublicKey:  creds.AWGPublicKey,
@@ -333,6 +334,16 @@ func buildAWGPeerRegistryForProfile(st stateFile, devices []approvedDevice, prof
 		})
 	}
 	return awgPeerRegistry{Clients: clients}, desired
+}
+
+// awgKeyIdentity compares AWG keys by their bytes: base64 texts that differ
+// only in unused trailing bits are the same key and must not become two
+// peers.
+func awgKeyIdentity(key string) string {
+	if hexKey, err := serverpeer.KeyB64ToHex(key); err == nil {
+		return hexKey
+	}
+	return strings.TrimSpace(key)
 }
 
 func approvedDeviceProfileCreds(device approvedDevice, profileName string) (approvedDeviceAWGProfile, bool) {
@@ -366,8 +377,9 @@ func approvedDeviceExpiry(device approvedDevice) (time.Time, bool) {
 	}
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
-		slog.Warn("approved device has invalid expires_at", "device_id", device.DeviceID, "expires_at", value, "err", err)
-		return time.Time{}, false
+		// Fail closed: a limit the worker cannot read is treated as passed.
+		slog.Warn("approved device has invalid expires_at; treating it as expired", "device_id", sanitizeLogValue(device.DeviceID), "expires_at", sanitizeLogValue(value), "err", err)
+		return time.Unix(0, 0).UTC(), true
 	}
 	return parsed.UTC(), true
 }

@@ -1,0 +1,2 @@
+# Test-only fixture in a commit of the device-expiry change (not a secret).
+7762b81ab655a06236b12cf8910e3a3146a75a9a:agent/cmd/agent/materialize_test.go:generic-api-key:1101

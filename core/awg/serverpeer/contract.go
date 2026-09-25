@@ -37,6 +37,9 @@ type GatewayConfig struct {
 	Dialect         dialect.Dialect `json:"dialect"`
 	PeerRegistry    string          `json:"peer_registry,omitempty"`
 	ServerKeepalive int             `json:"server_keepalive"`
+	// WorkerAddresses are the worker's own literal IPs. Unless private
+	// egress is allowed, awg-gw drops client traffic forwarded to them.
+	WorkerAddresses []string `json:"worker_addresses,omitempty"`
 }
 
 // KeyB64ToHex converts a standard-base64 32-byte key to lowercase hex.

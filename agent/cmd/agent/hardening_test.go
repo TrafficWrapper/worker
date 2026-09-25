@@ -230,6 +230,39 @@ func TestXrayRoutingBlocksPrivateDestinationsByDefault(t *testing.T) {
 	}
 }
 
+func TestWorkerAddressesKeepOnlyLiteralIPs(t *testing.T) {
+	cfg := envConfig{EgressIP: "203.0.113.10", PublicAddress: "vpn.example.net", PublicAddressV6: "2001:db8::1"}
+	if got := strings.Join(workerAddresses(cfg), ","); got != "203.0.113.10,2001:db8::1" {
+		t.Fatalf("workerAddresses=%q", got)
+	}
+	cfg = envConfig{EgressIP: "203.0.113.10", PublicAddress: "198.51.100.7"}
+	if got := strings.Join(workerAddresses(cfg), ","); got != "203.0.113.10,198.51.100.7" {
+		t.Fatalf("workerAddresses=%q", got)
+	}
+	cfg = envConfig{EgressIP: "203.0.113.10", PublicAddress: "203.0.113.10", PublicAddressV6: "[::ffff:203.0.113.10]"}
+	if got := strings.Join(workerAddresses(cfg), ","); got != "203.0.113.10" {
+		t.Fatalf("duplicates not removed: %q", got)
+	}
+}
+
+func TestXrayRoutingBlocksWorkerOwnAddresses(t *testing.T) {
+	cfg := envConfig{EgressIP: "203.0.113.10", PublicAddress: "198.51.100.7", PublicAddressV6: "2001:db8::1"}
+	raw, _ := json.Marshal(xrayRouting(cfg))
+	for _, want := range []string{`"203.0.113.10"`, `"198.51.100.7"`, `"2001:db8::1"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("routing does not block worker address %s: %s", want, raw)
+		}
+	}
+	if strings.Count(strings.Join(privateEgressCIDRs, ","), "203.0.113.10") != 0 {
+		t.Fatal("worker addresses leaked into the shared private CIDR list")
+	}
+	cfg.AllowPrivateEgress = true
+	open, _ := json.Marshal(xrayRouting(cfg))
+	if strings.Contains(string(open), "203.0.113.10") {
+		t.Fatalf("private egress opt-out still blocks worker addresses: %s", open)
+	}
+}
+
 func TestXrayConfigOmitsSmokeUserWhenDisabledAndDedupesEmails(t *testing.T) {
 	cfg := envConfig{RealityDest: "example.com:443", CamouflageDomain: "example.com", DisableSmokePeers: true}
 	doc := xrayConfigDocument(cfg, hardeningTestState(), []approvedDevice{
@@ -305,6 +338,9 @@ func TestReadEnvRejectsInvalidValues(t *testing.T) {
 		"orch key":    {"ORCH_URL": "https://orch.example:9091"},
 		"smoke flag":  {"WORKER_SMOKE_PEERS": "yes"},
 		"placeholder": {"CAMOUFLAGE_DOMAIN": "example.com"},
+		"smtp flag":   {"WORKER_BLOCK_SMTP": "2"},
+		"bt flag":     {"WORKER_BLOCK_BITTORRENT": "enable"},
+		"egress flag": {"WORKER_ALLOW_PRIVATE_EGRESS": "y"},
 	}
 	for name, overrides := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -330,6 +366,42 @@ func TestReadEnvRejectsInvalidValues(t *testing.T) {
 	}
 	if !cfg.DisableSmokePeers || cfg.RealityDest != "www.example.net:443" {
 		t.Fatalf("orchestrated defaults wrong: smoke_disabled=%t dest=%q", cfg.DisableSmokePeers, cfg.RealityDest)
+	}
+}
+
+// The agent and awg-gw must read the blocking switches the same way: "true"
+// used to turn SMTP and BitTorrent blocking off for REALITY clients only.
+func TestReadEnvBlockingSwitchesUseStrictBool(t *testing.T) {
+	t.Setenv("WORKER_STATE_DIR", t.TempDir())
+	t.Setenv("EGRESS_IP", "203.0.113.10")
+	t.Setenv("CAMOUFLAGE_DOMAIN", "www.example.net")
+	cases := []struct {
+		value   string
+		block   bool
+		private bool
+	}{
+		{value: "", block: true, private: false},
+		{value: "true", block: true, private: true},
+		{value: "YES", block: true, private: true},
+		{value: "on", block: true, private: true},
+		{value: "1", block: true, private: true},
+		{value: "false", block: false, private: false},
+		{value: "off", block: false, private: false},
+		{value: "0", block: false, private: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("WORKER_BLOCK_SMTP", tc.value)
+			t.Setenv("WORKER_BLOCK_BITTORRENT", tc.value)
+			t.Setenv("WORKER_ALLOW_PRIVATE_EGRESS", tc.value)
+			cfg, err := readEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.BlockSMTP != tc.block || cfg.BlockBitTorrent != tc.block || cfg.AllowPrivateEgress != tc.private {
+				t.Fatalf("value %q: smtp=%t bt=%t private=%t", tc.value, cfg.BlockSMTP, cfg.BlockBitTorrent, cfg.AllowPrivateEgress)
+			}
+		})
 	}
 }
 

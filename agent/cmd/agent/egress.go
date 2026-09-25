@@ -10,6 +10,28 @@ import (
 	"time"
 )
 
+// workerAddresses are the worker's own literal IPs: the egress address and
+// the advertised public addresses. Clients must not reach services on the
+// host through them, so Xray routing and the awg-gw forward filter block them
+// like private destinations. Hostnames are skipped.
+func workerAddresses(cfg envConfig) []string {
+	var out []string
+	seen := map[netip.Addr]bool{}
+	for _, value := range []string{cfg.EgressIP, cfg.PublicAddress, cfg.PublicAddressV6} {
+		addr, err := netip.ParseAddr(strings.Trim(strings.TrimSpace(value), "[]"))
+		if err != nil || addr.Zone() != "" {
+			continue
+		}
+		addr = addr.Unmap()
+		if seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		out = append(out, addr.String())
+	}
+	return out
+}
+
 func outboundIP() string {
 	c, err := net.DialTimeout("udp", "1.1.1.1:53", time.Second)
 	if err != nil {

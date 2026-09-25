@@ -94,6 +94,7 @@ func renderAWG(cfg envConfig, st stateFile) error {
 			Dialect:         profileDialect(st, profile),
 			PeerRegistry:    profile.registryPath(cfg.StateDir),
 			ServerKeepalive: cfg.AWGServerKeepalive,
+			WorkerAddresses: workerAddresses(cfg),
 		}
 		if err := writeJSONFile(profile.configPath(cfg.StateDir), awgCfg, 0o600); err != nil {
 			return err

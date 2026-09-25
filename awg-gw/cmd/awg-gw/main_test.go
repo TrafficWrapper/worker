@@ -214,6 +214,35 @@ func TestClientIsolationBlocksPrivateDestinationsFromTunnel(t *testing.T) {
 	}
 }
 
+func TestIsolationFromEnvUsesStrictBool(t *testing.T) {
+	cases := []struct {
+		allowPrivate, blockSMTP string
+		want                    isolationSettings
+	}{
+		{"", "", isolationSettings{BlockPrivate: true, BlockSMTP: true}},
+		{"1", "0", isolationSettings{BlockPrivate: false, BlockSMTP: false}},
+		{"true", "false", isolationSettings{BlockPrivate: false, BlockSMTP: false}},
+		{"No", "YES", isolationSettings{BlockPrivate: true, BlockSMTP: true}},
+		{"off", "on", isolationSettings{BlockPrivate: true, BlockSMTP: true}},
+	}
+	for _, tc := range cases {
+		t.Setenv("WORKER_ALLOW_PRIVATE_EGRESS", tc.allowPrivate)
+		t.Setenv("WORKER_BLOCK_SMTP", tc.blockSMTP)
+		got, err := isolationFromEnv()
+		if err != nil || got != tc.want {
+			t.Fatalf("allow_private=%q smtp=%q: %+v, %v want %+v", tc.allowPrivate, tc.blockSMTP, got, err, tc.want)
+		}
+	}
+	for _, env := range []string{"WORKER_ALLOW_PRIVATE_EGRESS", "WORKER_BLOCK_SMTP"} {
+		t.Setenv("WORKER_ALLOW_PRIVATE_EGRESS", "")
+		t.Setenv("WORKER_BLOCK_SMTP", "")
+		t.Setenv(env, "2")
+		if _, err := isolationFromEnv(); err == nil {
+			t.Fatalf("%s=2 accepted", env)
+		}
+	}
+}
+
 func TestLoadActivePeersSkipsMalformedEntries(t *testing.T) {
 	good := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
 	registry := `{"clients":[

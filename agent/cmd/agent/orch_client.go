@@ -839,6 +839,9 @@ func writeUpdateArtifact(cfg envConfig, update *orchUpdateArtifact) error {
 	if strings.TrimSpace(update.ManifestJSON) == "" || strings.TrimSpace(update.ManifestMinisig) == "" || strings.TrimSpace(update.APKBase64) == "" {
 		return errors.New("update artifact is incomplete")
 	}
+	if err := checkUpdateManifestSignature(cfg.StateDir, update.ManifestJSON, update.ManifestMinisig); err != nil {
+		return err
+	}
 	apkName := filepath.Base(strings.TrimSpace(update.APKName))
 	if apkName == "." || apkName == "/" || apkName == "" {
 		return errors.New("update artifact apk_name is empty")

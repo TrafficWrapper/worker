@@ -173,6 +173,9 @@ func readEnv() (envConfig, error) {
 		return envConfig{}, err
 	}
 	cfg.RealityDest = realityDest(cfg.RealityDest, cfg.CamouflageDomain)
+	if err := validateSelfDescribeEnv(cfg); err != nil {
+		return envConfig{}, err
+	}
 	if isSelfStealDest(cfg.RealityDest) {
 		slog.Warn("REALITY_DEST is the internal self-signed fallback; active probes can tell it apart from the real camouflage site", "reality_dest", cfg.RealityDest, "camouflage_domain", cfg.CamouflageDomain)
 	}

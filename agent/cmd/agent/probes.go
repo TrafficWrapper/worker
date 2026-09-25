@@ -153,12 +153,19 @@ func tlsProbe(ctx context.Context, addr, serverName string) probeReport {
 	return report
 }
 
+// probeErrorMaxLen keeps health reports inside the self_describe string limit.
+const probeErrorMaxLen = 200
+
 func probeError(err error) string {
+	msg := err.Error()
 	var verr *tls.CertificateVerificationError
 	if errors.As(err, &verr) {
-		return "certificate is not valid for the camouflage name: " + verr.Err.Error()
+		msg = "certificate is not valid for the camouflage name: " + verr.Err.Error()
 	}
-	return err.Error()
+	if len(msg) > probeErrorMaxLen {
+		msg = strings.ToValidUTF8(msg[:probeErrorMaxLen], "")
+	}
+	return msg
 }
 
 func probeProblem(r probeReport) string {

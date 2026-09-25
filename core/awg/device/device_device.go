@@ -90,27 +90,8 @@ type Device struct {
 	closed   chan struct{}
 	log      *Logger
 
-	junk struct {
-		min   int
-		max   int
-		count int
-	}
-
-	headers struct {
-		init      *magicHeader
-		cookie    *magicHeader
-		response  *magicHeader
-		transport *magicHeader
-	}
-
-	paddings struct {
-		init      int
-		response  int
-		cookie    int
-		transport int
-	}
-
-	ipackets [5]*obfChain
+	// awg holds the AmneziaWG parameters; see awgParams.
+	awg atomic.Pointer[awgParams]
 }
 
 // deviceState represents the state of a Device.
@@ -321,10 +302,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.rate.limiter.Init()
 	device.indexTable.Init()
 
-	device.headers.init = &magicHeader{start: MessageInitiationType, end: MessageInitiationType}
-	device.headers.response = &magicHeader{start: MessageResponseType, end: MessageResponseType}
-	device.headers.cookie = &magicHeader{start: MessageCookieReplyType, end: MessageCookieReplyType}
-	device.headers.transport = &magicHeader{start: MessageTransportType, end: MessageTransportType}
+	device.awg.Store(defaultAWGParams())
 
 	device.PopulatePools()
 

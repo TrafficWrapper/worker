@@ -157,10 +157,12 @@ services:
     image: ghcr.io/trafficwrapper/worker-xray:${WORKER_VERSION:-local}
     build:
       context: xray
+    # Only the agent, which writes the config. REALITY must not wait for the
+    # AWG gateway or the distributor: a problem there would take REALITY
+    # down with it. A self-steal REALITY_DEST is dialed only when a probe
+    # arrives.
     depends_on:
       agent:
-        condition: service_healthy
-      distributor:
         condition: service_healthy
     environment:
       XRAY_API_SOCKET: /run/xray-api/api.sock

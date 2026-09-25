@@ -148,7 +148,8 @@ def reality_main(args) -> int:
 
 
 def capture(interface: str, awg_port: int, duration: int, pcap_path: str):
-    cmd = ["tcpdump", "-i", interface, "-nn", "-s", "256", "-w", pcap_path, f"udp port {awg_port}"]
+    # Full snaplen: headers sit at offset s1..s4 and the verdict needs whole packets.
+    cmd = ["tcpdump", "-i", interface, "-nn", "-s", "0", "-w", pcap_path, f"udp port {awg_port}"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     time.sleep(duration)
     proc.send_signal(signal.SIGTERM)
@@ -196,7 +197,7 @@ def read_pcap(path: str, ports: set[int]):
             parsed = parse_frame(frame, linktype)
             if not parsed:
                 continue
-            src, dst, sport, dport, payload = parsed
+            src, dst, sport, dport, payload, payload_len = parsed
             if sport not in ports and dport not in ports:
                 continue
             port = sport if sport in ports else dport
@@ -208,7 +209,7 @@ def read_pcap(path: str, ports: set[int]):
                 dport=dport,
                 src=src,
                 dst=dst,
-                payload_len=len(payload),
+                payload_len=payload_len,
                 first4_le=first4,
                 payload=payload,
             )
@@ -262,7 +263,17 @@ def parse_frame(frame: bytes, linktype: int):
     udp_offset = offset + ihl
     sport, dport, udp_len, _ = struct.unpack("!HHHH", frame[udp_offset:udp_offset + 8])
     payload = frame[udp_offset + 8:udp_offset + min(udp_len, len(frame) - udp_offset)]
-    return src, dst, sport, dport, payload
+    return src, dst, sport, dport, payload, udp_payload_len(udp_len, len(payload))
+
+
+def udp_payload_len(udp_len: int, captured_len: int) -> int:
+    """Real UDP payload length from the UDP header.
+
+    A capture with a short snaplen truncates frames, so the captured bytes
+    undercount; the header length is what went on the wire. The result is
+    never below the bytes actually captured.
+    """
+    return max(udp_len - 8, captured_len)
 
 
 def build_report(packets: list[Packet], dialect: dict, awg_port: int) -> dict:

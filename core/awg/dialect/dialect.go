@@ -98,27 +98,26 @@ func GenerateWithReader(r io.Reader) (Dialect, error) {
 	if err != nil {
 		return Dialect{}, err
 	}
-	s1, err := randInt(r, 15, 150)
-	if err != nil {
-		return Dialect{}, err
-	}
-	var s2 int
-	for {
-		s2, err = randInt(r, 15, 150)
-		if err != nil {
+	var s1, s2, s3, s4 int
+	for attempt := 0; ; attempt++ {
+		if attempt == 1000 {
+			return Dialect{}, errors.New("no padding combination without size collisions")
+		}
+		if s1, err = randInt(r, 15, 150); err != nil {
 			return Dialect{}, err
 		}
-		if s1+56 != s2 {
+		if s2, err = randInt(r, 15, 150); err != nil {
+			return Dialect{}, err
+		}
+		if s3, err = randInt(r, 0, 64); err != nil {
+			return Dialect{}, err
+		}
+		if s4, err = randInt(r, 0, 32); err != nil {
+			return Dialect{}, err
+		}
+		if s1+56 != s2 && len(SizeCollisions(Dialect{S1: s1, S2: s2, S3: s3, S4: s4})) == 0 {
 			break
 		}
-	}
-	s3, err := randInt(r, 0, 64)
-	if err != nil {
-		return Dialect{}, err
-	}
-	s4, err := randInt(r, 0, 32)
-	if err != nil {
-		return Dialect{}, err
 	}
 	headers, err := generateHeaders(r)
 	if err != nil {
@@ -342,27 +341,78 @@ func Summary(d Dialect) string {
 	)
 }
 
+// generateHeaders places the four header ranges anywhere in [5, 2^31-1]
+// without overlap. Fixed windows would be the same in every deployment and
+// identify the project on the wire.
 func generateHeaders(r io.Reader) ([4]HeaderRange, error) {
-	buckets := [][2]uint32{
-		{100_000_000, 450_000_000},
-		{600_000_000, 950_000_000},
-		{1_100_000_000, 1_450_000_000},
-		{1_600_000_000, 2_050_000_000},
-	}
 	var out [4]HeaderRange
-	for i, bucket := range buckets {
+	for i := range out {
 		width, err := randUint32(r, minHeaderSpan, maxHeaderSpan)
 		if err != nil {
 			return out, err
 		}
-		maxStart := bucket[1] - width
-		start, err := randUint32(r, bucket[0], maxStart)
-		if err != nil {
-			return out, err
+		placed := false
+		for attempt := 0; attempt < 1000 && !placed; attempt++ {
+			start, err := randUint32(r, minHeader, maxHeader-width)
+			if err != nil {
+				return out, err
+			}
+			candidate := HeaderRange{Start: start, End: start + width}
+			placed = true
+			for _, prev := range out[:i] {
+				if candidate.Overlaps(prev) {
+					placed = false
+					break
+				}
+			}
+			if placed {
+				out[i] = candidate
+			}
 		}
-		out[i] = HeaderRange{Start: start, End: start + width}
+		if !placed {
+			return out, errors.New("could not place non-overlapping header ranges")
+		}
 	}
 	return out, nil
+}
+
+// Wire sizes the receiver classifies packets by: a handshake message is its
+// fixed size plus its padding, a transport message is the S4 padding, a
+// 16-byte header and the encrypted payload (a multiple of 16 plus a 16-byte
+// tag).
+const (
+	initiationSize     = 148
+	responseSize       = 92
+	cookieReplySize    = 64
+	transportMinSize   = 32
+	transportSizeAlign = 16
+	transportHeaderLen = 16
+)
+
+// SizeCollisions lists the handshake messages that a transport message of
+// the same size could be taken for. Such a packet is checked against the
+// handshake's header range at an offset that falls on the transport
+// receiver index or counter; the receiver index is fixed for a session, so
+// one unlucky session loses every packet of that size (for S2 == S4+4, the
+// size of a TCP ACK over IPv6). Newly generated dialects avoid these;
+// stored ones are only reported.
+func SizeCollisions(d Dialect) []string {
+	var out []string
+	for _, m := range []struct {
+		name          string
+		padding, size int
+	}{
+		{"s1/initiation", d.S1, initiationSize},
+		{"s2/response", d.S2, responseSize},
+		{"s3/cookie", d.S3, cookieReplySize},
+	} {
+		offset := m.padding - d.S4 // where the handshake header would be read
+		extra := m.padding + m.size - d.S4 - transportMinSize
+		if offset >= 1 && offset < transportHeaderLen && extra >= 0 && extra%transportSizeAlign == 0 {
+			out = append(out, m.name)
+		}
+	}
+	return out
 }
 
 func randInt(r io.Reader, min, max int) (int, error) {

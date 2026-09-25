@@ -206,8 +206,8 @@ signed config, сгенерирует/применит REALITY и AWG settings �
 
 `install.sh` — optional helper для production-style hosts. Он может:
 
-- автоматически выбрать свободные порты из `REALITY_PORT_POOL` и
-  `AWG_PORT_POOL`;
+- выбрать свободные порты: 443 для REALITY, если свободен, иначе случайные
+  (или из `REALITY_PORT_POOL` / `AWG_PORT_POOL`, если заданы);
 - определить WAN interface и public egress;
 - записать `.env`;
 - при `APPLY_NFT=1` поставить nft accept/NAT rules для выбранных портов.
@@ -245,8 +245,8 @@ binaries:
 | `REALITY_PROBE_ADDR` | Адрес, по которому агент проверяет свой REALITY-листенер как цензор без ключа клиента. | Опц. | `xray:8443` | Оставьте default Compose. |
 | `WORKER_ALLOW_PRIVATE_EGRESS` | Разрешает VPN-клиентам доступ к приватным, loopback, link-local (cloud metadata) и внутренним Docker-адресам через воркер. | Опц. | `0` | Оставьте `0`: такие диапазоны блокируют и роутинг Xray, и forward-фильтр `awg-gw`. |
 | `WORKER_SMOKE_PEERS` | Встроенные smoke-учётки (`p0-smoke` в REALITY и smoke-пир AWG). | Опц. | включены в standalone, выключены при `ORCH_URL` | `1` — оставить на воркере с оркестратором для `awg-smoke`, `0` — выключить. |
-| `XRAY_PORT` | Public TCP port, mapped to REALITY container. | Опц. | `2053` | `8444`, `2053` или другой свободный TCP port. |
-| `AWG_PORT` | Public UDP port для AWG. | Опц. | `51888` | Любой свободный UDP port. |
+| `XRAY_PORT` | Public TCP port, mapped to REALITY container. | Опц. | выбирает `install.sh` (fallback Compose `2053`) | `install.sh` берёт 443, если свободен, иначе случайный порт 20000-59999, и сохраняет его при повторных запусках. |
+| `AWG_PORT` | Public UDP port для AWG. | Опц. | выбирает `install.sh` (fallback Compose `51888`) | Случайный свободный UDP-порт 20000-59999, сохраняется при повторных запусках. |
 | `AGENT_PORT` | Localhost TCP port для worker agent health/API. | Опц. | `9090` | По умолчанию `127.0.0.1:9090`. |
 | `AGENT_API_ALLOW_CIDRS` | Дополнительные источники (CIDR или IP через запятую), которым можно читать `/self-describe` и `/metrics`. | Опц. | пусто | Только для scraper-контейнера в Compose-сети; loopback и порт хоста работают и без него. |
 | `AWG_SUBNET` | Worker AWG subnet для internal IP устройств. | Опц. | `10.13.13.0/24` | Private subnet без конфликтов с host. |
@@ -266,7 +266,9 @@ binaries:
 | `XRAY_NETWORK` | Xray REALITY stream network. | Опц. | `tcp` | Ставьте `xhttp` только когда operator настроил matching XHTTP params на этом worker. |
 | `XRAY_XHTTP_PATH` | XHTTP path при `XRAY_NETWORK=xhttp`. | Опц. | empty | Operator-chosen path; public default нет. |
 | `XRAY_XHTTP_MODE` | XHTTP mode при `XRAY_NETWORK=xhttp`. | Опц. | empty | Передаётся в Xray `xhttpSettings.mode`. |
-| `XRAY_XHTTP_HOST` | XHTTP Host при `XRAY_NETWORK=xhttp`. | Опц. | `CAMOUFLAGE_DOMAIN` | Переопределяйте только если operator route config требует другой XHTTP host. |
+| `REALITY_MAX_TIME_DIFF` | На сколько секунд время REALITY-хендшейка клиента может отличаться от часов воркера (Xray `maxTimeDiff`). | Опц. | `120` | Отвергает повторно проигранные ClientHello; `0` выключает проверку (клиенты с сильно сбитыми часами). |
+| `XRAY_XHTTP_HOST` | XHTTP Host при `XRAY_NETWORK=xhttp`. | Опц. | `CAMOUFLAGE_DOMAIN` | Переопределяйте только если operator route config требует другой XHTTP host. Host, отличный от `CAMOUFLAGE_DOMAIN`, логируется и отражается как `degraded: xhttp_host`: маршруты оркестратора публикуются с доменом камуфляжа. |
+| `AWG_INBOUNDS` | AWG-профили в JSON (`name`, `interface`, `listen_port`, `public_port`, `subnet`, `own_dialect`, `min_version_code`, ...). | Опц. | один базовый профиль | `min_version_code` — код, выведенный из имени версии приложения: major*10000+minor*100+patch (0.1.31 → 131), а не Android `versionCode`. Ротация диалекта — в ARCHITECTURE. |
 | `XRAY_XHTTP_EXTRA_JSON` | Extra XHTTP JSON object. | Опц. | empty | Advanced passthrough как `xhttpSettings.extra`; оставьте empty, если не знаете Xray field shape. |
 | `WORKER_STATE_DIR` | Worker state directory внутри containers. | Опц. | `/var/lib/trafficwrapper-worker` в binaries; Compose использует `/worker-state` | Оставьте Compose default, если не запускаете binaries вручную. |
 | `TW_WORKER_DIALECT_JSON` | Advanced override AmneziaWG dialect JSON. | Опц. | generated dialect | Только для controlled testing. |
@@ -274,8 +276,8 @@ binaries:
 | `APPLY_NFT` | Включает install-time nft accept rules для выбранных портов. | Опц. | `0` | `1` только после проверки rules. |
 | `EGRESS_VIA_WG` | Reserved deployment hint из `.env.example`; текущими binaries не используется. | Опц. | empty | Оставьте empty, если не расширяете scripts. |
 | `COMPOSE` | Compose command для `install.sh`/`uninstall.sh`. | Опц. | `docker compose` | `docker-compose` на старых hosts. |
-| `REALITY_PORT_POOL` | TCP port pool для auto-selection в `install.sh`. | Опц. | `8444 2053 2083` | Quoted space-separated list. |
-| `AWG_PORT_POOL` | UDP port pool для auto-selection в `install.sh`. | Опц. | `51888 51889 51890 51891` | Quoted space-separated list. |
+| `REALITY_PORT_POOL` | TCP-порты, из которых выбирает `install.sh`. | Опц. | 443, затем случайный | Список через пробел в кавычках, только чтобы зафиксировать выбор. |
+| `AWG_PORT_POOL` | UDP-порты, из которых выбирает `install.sh`. | Опц. | случайный | Список через пробел в кавычках, только чтобы зафиксировать выбор. |
 | `WAIT_TIMEOUT` | Сколько секунд `install.sh` ждёт, пока все сервисы станут healthy. | Опц. | `180` | Увеличьте на медленных хостах, где первая сборка дольше. |
 | `SERVICE_NAME` | `awg-gw` stub/debug service name. | Опц. | `awg-gw` | Только для stub/manual runs. |
 | `AWG_LISTEN_UDP` | `awg-gw` stub/debug UDP listen value. | Опц. | `51821` | Только для stub/manual runs. |

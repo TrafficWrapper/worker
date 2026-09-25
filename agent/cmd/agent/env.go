@@ -52,6 +52,9 @@ type envConfig struct {
 	BlockSMTP              bool
 	BlockBitTorrent        bool
 	AgentAPIAllowCIDRs     string
+	// RealityMaxTimeDiff bounds how far a client's ClientHello time may be
+	// from the worker's, so a recorded handshake cannot be replayed later.
+	RealityMaxTimeDiff time.Duration
 }
 
 type awgInboundProfile struct {
@@ -148,6 +151,11 @@ func readEnv() (envConfig, error) {
 		return envConfig{}, errors.New("ORCH_ACK_INTERVAL must be a duration between 10s and 1h")
 	}
 	cfg.OrchAckInterval = ackInterval
+	maxTimeDiff, err := getenvIntInRange("REALITY_MAX_TIME_DIFF", 120, 0, 3600)
+	if err != nil {
+		return envConfig{}, err
+	}
+	cfg.RealityMaxTimeDiff = time.Duration(maxTimeDiff) * time.Second
 	if cfg.MetricsScrubPeerLabels {
 		salt, err := loadMetricsScrubSalt(cfg.StateDir, os.Getenv("TW_METRICS_SCRUB_SALT"))
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 )
 
 const (
@@ -208,4 +209,24 @@ func validRealityFlow(flow string) error {
 	default:
 		return errors.New("reality_flow must be empty or " + flowVision)
 	}
+}
+
+// xhttpHostMismatch is set when an XHTTP inbound expects a Host other than
+// the camouflage domain. The orchestrator publishes routes with the
+// camouflage domain, so such an inbound answers clients with 404.
+var xhttpHostMismatch atomic.Bool
+
+// checkXHTTPHosts warns about XHTTP inbounds whose Host differs from
+// CAMOUFLAGE_DOMAIN and reports them in self_check. They stay published.
+func checkXHTTPHosts(cfg envConfig) []string {
+	var mismatched []string
+	for _, p := range realityProfiles(cfg) {
+		if p.Network != "xhttp" || p.XHTTPHost == "" || strings.EqualFold(p.XHTTPHost, strings.TrimSpace(cfg.CamouflageDomain)) {
+			continue
+		}
+		mismatched = append(mismatched, p.Name)
+		slog.Warn("XHTTP host differs from CAMOUFLAGE_DOMAIN; clients using the published route will get 404", "profile", p.Name, "xhttp_host", p.XHTTPHost, "camouflage_domain", cfg.CamouflageDomain)
+	}
+	xhttpHostMismatch.Store(len(mismatched) > 0)
+	return mismatched
 }

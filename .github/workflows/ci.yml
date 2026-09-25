@@ -49,6 +49,25 @@ jobs:
         working-directory: ${{ matrix.module }}
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
+  dns:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.x"
+
+      - name: Build dnsproxy
+        working-directory: dns
+        run: go build -o /dev/null github.com/AdguardTeam/dnsproxy
+
+      - name: Vulnerability check
+        working-directory: dns
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 github.com/AdguardTeam/dnsproxy
+
   lint:
     runs-on: ubuntu-latest
     strategy:
@@ -82,10 +101,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
-        run: shellcheck install.sh uninstall.sh distributor/entrypoint.sh dns/entrypoint.sh xray/entrypoint.sh tests/install_env_test.sh
+        run: shellcheck install.sh uninstall.sh distributor/entrypoint.sh dns/entrypoint.sh xray/entrypoint.sh tests/install_env_test.sh tests/install_ports_test.sh tests/install_release_test.sh
 
       - name: install.sh tests
-        run: bash tests/install_env_test.sh
+        run: |
+          bash tests/install_env_test.sh
+          bash tests/install_ports_test.sh
+          bash tests/install_release_test.sh
 
   docker:
     runs-on: ubuntu-latest

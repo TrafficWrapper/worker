@@ -114,17 +114,22 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 			}
 			profileClients = append(profileClients, entry)
 		}
+		realitySettings := map[string]any{
+			"show":        false,
+			"dest":        cfg.RealityDest,
+			"xver":        0,
+			"serverNames": []string{cfg.CamouflageDomain},
+			"privateKey":  st.Reality.PrivateKey,
+			"shortIds":    shortIDs,
+		}
+		if cfg.RealityMaxTimeDiff > 0 {
+			// Xray takes milliseconds; 0 (unset) accepts any age.
+			realitySettings["maxTimeDiff"] = cfg.RealityMaxTimeDiff.Milliseconds()
+		}
 		streamSettings := map[string]any{
-			"network":  profile.Network,
-			"security": "reality",
-			"realitySettings": map[string]any{
-				"show":        false,
-				"dest":        cfg.RealityDest,
-				"xver":        0,
-				"serverNames": []string{cfg.CamouflageDomain},
-				"privateKey":  st.Reality.PrivateKey,
-				"shortIds":    shortIDs,
-			},
+			"network":         profile.Network,
+			"security":        "reality",
+			"realitySettings": realitySettings,
 		}
 		if profile.Network == "xhttp" {
 			settings := realityXHTTPSettings(profile)

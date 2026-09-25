@@ -6,6 +6,7 @@ updates:
       - /awg-gw
       - /awg-smoke
       - /core
+      - /dns
     schedule:
       interval: weekly
     ignore:

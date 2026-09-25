@@ -51,7 +51,7 @@ run 0 --yes
 [ "$status" -eq 0 ] || fail "uninstall.sh failed: $(cat "$work/err")"
 [ ! -e "$work/w/worker-state" ] || fail "worker-state not removed"
 ls "$work/w"/worker-state-backup-*.tgz >/dev/null 2>&1 || fail "no backup archive"
-grep -qx 'docker compose --profile smoke down --remove-orphans' "$work/log" ||
+grep -qx 'docker compose --profile smoke --profile dns down --remove-orphans' "$work/log" ||
   fail "unexpected compose call: $(cat "$work/log")"
 
 # --keep-state: containers go, state stays.
@@ -62,7 +62,7 @@ run 0 --yes --keep-state
 # --purge-images removes the project's images and volumes.
 run 0 --yes --purge-images
 [ "$status" -eq 0 ] || fail "uninstall.sh --purge-images failed: $(cat "$work/err")"
-grep -qx 'docker compose --profile smoke down --remove-orphans --rmi all -v' "$work/log" ||
+grep -qx 'docker compose --profile smoke --profile dns down --remove-orphans --rmi all -v' "$work/log" ||
   fail "--purge-images does not remove images: $(cat "$work/log")"
 
 # A failed purge also keeps the state.

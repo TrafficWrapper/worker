@@ -55,10 +55,10 @@ backup_state() {
   echo "backup written to $PWD/$archive"
 }
 
-# The smoke profile is included so its container and image go too. Every
-# service image is a worker-* image, so --rmi all removes only the worker's
-# own images, whether built locally or pulled from a release.
-down_args=(--profile smoke down --remove-orphans)
+# The smoke and dns profiles are included so their containers and images go
+# too. Every service image is a worker-* image, so --rmi all removes only the
+# worker's own images, whether built locally or pulled from a release.
+down_args=(--profile smoke --profile dns down --remove-orphans)
 if [ "$purge_images" = "1" ]; then
   down_args+=(--rmi all -v)
 fi

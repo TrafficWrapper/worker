@@ -200,7 +200,7 @@ func TestInlineAPKFailureDoesNotBlockConfig(t *testing.T) {
 	worker := signedBundleForTest(t, priv, pubText, "worker-config-v1", 2, `,"desired_state":{"approved_devices":[]}`)
 	client := signedBundleForTest(t, priv, pubText, "client-config-v1", 2, "")
 	broken := &orchUpdateArtifact{ManifestJSON: `{"apk_sha256":"` + strings.Repeat("a", 64) + `"}`, ManifestMinisig: "sig", APKName: "app.apk", APKBase64: base64.StdEncoding.EncodeToString([]byte("not it"))}
-	seq, _, err := applyOrchBundles(cfg, stateFile{}, state, worker, client, broken)
+	seq, _, err := applyOrchBundles(cfg, hardeningTestState(), state, worker, client, broken)
 	if err != nil || seq != 2 {
 		t.Fatalf("config not applied because of the apk: seq=%d err=%v", seq, err)
 	}

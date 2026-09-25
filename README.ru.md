@@ -39,9 +39,8 @@ orchestrator:
 ## Diagnostics
 
 Worker agent отдаёт `/healthz`, `/self-describe` и `/metrics` на локальном agent
-port (`127.0.0.1:9090` через default Compose mapping). Prometheus endpoint
-предназначен для localhost scraping, потому что AWG peer labels содержат public
-keys, allowed IPs и endpoints, если не задан `TW_METRICS_SCRUB_PEER_LABELS=1`.
+port (`127.0.0.1:9090` через default Compose mapping). AWG peer labels — salted
+hashes без allowed IPs и endpoints, если не задан `TW_METRICS_RAW_PEER_LABELS=1`.
 См. [Monitoring](#monitoring).
 
 У каждого сервиса есть Docker healthcheck, поэтому `docker compose ps`
@@ -73,8 +72,8 @@ curl -s http://127.0.0.1:9090/metrics | grep '^tw_worker_'
 
 Порт слушает только localhost. Запускайте Prometheus (или `vmagent`/Grafana
 Alloy) на самом worker host с host networking либо пробрасывайте порт через SSH;
-не публикуйте его. Если метрики уходят с хоста, включите
-`TW_METRICS_SCRUB_PEER_LABELS=1`.
+не публикуйте его. Если метрики уходят с хоста, оставьте
+`TW_METRICS_RAW_PEER_LABELS=0`.
 
 Пример scrape config:
 
@@ -255,7 +254,7 @@ binaries:
 | `WORKER_VERSION` | Тег релиза готовых образов; пусто — локальная сборка. | Опц. | пусто | См. «Releases / prebuilt images». |
 | `LOG_LEVEL` | Уровень логов agent. | Опц. | `info` | `debug`, `info`, `warn` или `error`. |
 | `AWG_LOG_LEVEL` | Уровень логов `awg-gw` (AmneziaWG device). | Опц. | `error` | `verbose`, `error` или `silent`. |
-| `TW_METRICS_SCRUB_PEER_LABELS` | Заменяет public keys AWG peers в labels `/metrics` на salted hashes и убирает labels `allowed_ip`/`endpoint`. | Опц. | `0` | Ставьте `1`, если метрики уходят с хоста (удалённый Prometheus, общие дашборды). |
+| `TW_METRICS_RAW_PEER_LABELS` | Отдаёт в `/metrics` сырые public keys AWG peers и labels `allowed_ip`/`endpoint` вместо salted hashes. | Опц. | `0` | Оставьте `0`; `1` — только для локальной отладки. Старый `TW_METRICS_SCRUB_PEER_LABELS=0` скраб больше не выключает. |
 | `TW_METRICS_SCRUB_SALT` | Salt для scrubbed peer labels. | Опц. | генерируется один раз в `worker-state/metrics_salt` | Одинаковое значение на нескольких воркерах позволяет сопоставлять peers между ними. |
 | `DISTRIBUTOR_URL` | Internal URL `/tw/` distributor. | Опц. | `http://awg-gw:8080/tw` | Оставьте default для Compose. |
 | `WORKER_AGENT_URL` | Public/internal URL override для agent self-reference. | Опц. | empty | Только для custom deployments. |
@@ -302,7 +301,7 @@ binaries:
 | `xray/` | Сгенерированный Xray REALITY `config.json`. |
 | `distributor/certs/` | TLS-сертификат и ключ distributor; в `distributor/tw/` лежат опубликованные файлы для клиентов. |
 | `orch/` | `state.json` (enrollment/sequence state), последний подписанный `worker-config.json` + `.minisig`. |
-| `metrics_salt` | Salt для scrubbed metrics labels (создаётся при `TW_METRICS_SCRUB_PEER_LABELS=1`, если salt не задан). |
+| `metrics_salt` | Salt для scrubbed metrics labels (создаётся, если salt не задан и labels скрабятся). |
 
 Потеря `bootstrap.json` означает новые ключи REALITY/AWG/Noise: всех клиентов
 придётся перевыпустить, а воркер заново enroll-ить. Бэкапьте `worker-state/` и

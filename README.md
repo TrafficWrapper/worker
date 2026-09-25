@@ -39,9 +39,8 @@ For worker-specific failures, start with enrollment values
 
 The worker agent exposes `/healthz`, `/self-describe`, and `/metrics` on the
 local agent port (`127.0.0.1:9090` through the default Compose mapping). The
-Prometheus metrics endpoint is intended for localhost scraping because AWG peer
-labels include public keys, allowed IPs, and endpoints unless
-`TW_METRICS_SCRUB_PEER_LABELS=1`. See [Monitoring](#monitoring).
+AWG peer labels are salted hashes without allowed IPs or endpoints unless
+`TW_METRICS_RAW_PEER_LABELS=1`. See [Monitoring](#monitoring).
 
 Every service has a Docker healthcheck, so `docker compose ps` shows which one
 is not ready. Startup order is `agent` → `awg-gw` → `distributor` → `xray`.
@@ -71,8 +70,8 @@ curl -s http://127.0.0.1:9090/metrics | grep '^tw_worker_'
 
 The port is bound to localhost only. Run Prometheus (or an agent such as
 `vmagent`/Grafana Alloy) on the worker host with host networking, or forward
-the port over SSH; do not publish it. Enable
-`TW_METRICS_SCRUB_PEER_LABELS=1` before metrics leave the host.
+the port over SSH; do not publish it. Keep `TW_METRICS_RAW_PEER_LABELS=0`
+if metrics leave the host.
 
 Example scrape config:
 
@@ -252,7 +251,7 @@ binaries:
 | `WORKER_VERSION` | Release tag of prebuilt images; empty builds locally. | Optional | empty | See "Releases / prebuilt images". |
 | `LOG_LEVEL` | Agent log level. | Optional | `info` | `debug`, `info`, `warn` or `error`. |
 | `AWG_LOG_LEVEL` | `awg-gw` (AmneziaWG device) log level. | Optional | `error` | `verbose`, `error` or `silent`. |
-| `TW_METRICS_SCRUB_PEER_LABELS` | Replaces AWG peer public keys in `/metrics` labels with salted hashes and drops the `allowed_ip`/`endpoint` labels. | Optional | `0` | Set `1` when metrics leave the host (remote Prometheus, shared dashboards). |
+| `TW_METRICS_RAW_PEER_LABELS` | Exports raw AWG peer public keys and the `allowed_ip`/`endpoint` labels in `/metrics` instead of salted hashes. | Optional | `0` | Keep `0`; `1` only for local debugging. The old `TW_METRICS_SCRUB_PEER_LABELS=0` no longer disables scrubbing. |
 | `TW_METRICS_SCRUB_SALT` | Salt for scrubbed peer labels. | Optional | generated once into `worker-state/metrics_salt` | Set the same value on several workers to correlate peers across them. |
 | `DISTRIBUTOR_URL` | Internal URL of the `/tw/` distributor. | Optional | `http://awg-gw:8080/tw` | Keep default for Compose. |
 | `WORKER_AGENT_URL` | Public/internal URL override for agent self-reference. | Optional | empty | Set only for custom deployments. |
@@ -299,7 +298,7 @@ root, secrets are mode `0600`):
 | `xray/` | Generated Xray REALITY `config.json`. |
 | `distributor/certs/` | Distributor TLS certificate and key; `distributor/tw/` holds published client files. |
 | `orch/` | `state.json` (enrollment/sequence state), last signed `worker-config.json` + `.minisig`. |
-| `metrics_salt` | Salt for scrubbed metrics labels (created when `TW_METRICS_SCRUB_PEER_LABELS=1` and no salt is set). |
+| `metrics_salt` | Salt for scrubbed metrics labels (created when no salt is set and labels are scrubbed). |
 
 Losing `bootstrap.json` means new REALITY/AWG/Noise keys: every client must be
 re-provisioned and the worker re-enrolled. Back up `worker-state/` and `.env`

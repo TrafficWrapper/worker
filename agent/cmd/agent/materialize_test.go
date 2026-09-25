@@ -1130,3 +1130,22 @@ func keyB64(seed byte) string {
 	}
 	return base64.StdEncoding.EncodeToString(raw)
 }
+
+func TestAWGRegistryDedupesKeysByBytes(t *testing.T) {
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	canonical := base64.StdEncoding.EncodeToString(raw)
+	// The same key with the unused trailing bits of the last character set.
+	sameKey := canonical[:len(canonical)-2] + "B="
+	cfg := envConfig{AWGSubnet: "10.13.13.0/24", AWGGateway: "10.13.13.1"}
+	devices := []approvedDevice{
+		{DeviceID: "a", AWGPublicKey: canonical, InternalIP: "10.13.13.10/32", PSK2: keyB64(6), Status: "approved"},
+		{DeviceID: "b", AWGPublicKey: sameKey, InternalIP: "10.13.13.11/32", PSK2: keyB64(7), Status: "approved"},
+	}
+	registry, desired := buildAWGPeerRegistryForProfile(stateFile{}, devices, defaultAWGInboundProfile(cfg), false)
+	if len(registry.Clients) != 1 || len(desired) != 1 {
+		t.Fatalf("one key became %d peers", len(desired))
+	}
+}

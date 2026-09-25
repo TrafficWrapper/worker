@@ -25,6 +25,10 @@ services:
       WORKER_STATE_DIR: /worker-state
       AWG_UAPI_SOCKET: /var/run/wireguard/awg1.sock
       XRAY_API_SOCKET: /run/xray-api/api.sock
+      # Soft heap target below mem_limit: the Go GC works harder before the
+      # container is killed (an inline APK from an older orchestrator is
+      # decoded in memory).
+      GOMEMLIMIT: 320MiB
     volumes:
       - ./worker-state:/worker-state
       - awg-run:/var/run/wireguard
@@ -40,7 +44,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m
-    mem_limit: 256m
+    mem_limit: 448m
     pids_limit: 256
     healthcheck:
       test: ["CMD", "/usr/local/bin/worker-agent", "healthcheck"]

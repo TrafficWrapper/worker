@@ -19,7 +19,7 @@ const (
 
 // workerCapabilities lists the optional behaviors this worker implements. It
 // is published in self_describe and sent with every config pull.
-var workerCapabilities = []string{"reality_flow", "desired_state_enabled", "revoked_status"}
+var workerCapabilities = []string{"reality_flow", "desired_state_enabled", "revoked_status", "apk_fetch_v1"}
 
 // selfDescribeForbiddenKeys must never appear anywhere in self_describe; a
 // worker that sends one is dropped from client bundles.

@@ -97,3 +97,12 @@ jobs:
 
       - name: Build images
         run: docker compose --profile smoke --profile dns build
+
+      - name: Check distributor nginx config
+        run: |
+          mkdir -p "$RUNNER_TEMP/state/distributor/certs"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=ci \
+            -keyout "$RUNNER_TEMP/state/distributor/certs/tls.key" -out "$RUNNER_TEMP/state/distributor/certs/tls.crt"
+          image=ghcr.io/trafficwrapper/worker-distributor:local
+          docker run --rm --add-host agent:127.0.0.1 -v "$RUNNER_TEMP/state:/worker-state:ro" --entrypoint sh "$image" -c \
+            'sed "s/__AWG_GATEWAY__/10.13.13.1/g" /etc/nginx/templates/worker.conf.template >/etc/nginx/conf.d/default.conf && nginx -t'

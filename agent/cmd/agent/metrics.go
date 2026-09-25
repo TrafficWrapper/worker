@@ -27,6 +27,8 @@ var (
 	awgPeerPolicyDriftTotal atomic.Uint64
 	uapiErrorsTotal         atomic.Uint64
 	xrayAPIErrorsTotal      atomic.Uint64
+	// telemetryRelayLimitedTotal counts relay posts refused with 429.
+	telemetryRelayLimitedTotal atomic.Uint64
 
 	orchAppliedSeqGauge     atomic.Int64
 	orchDesiredSeqGauge     atomic.Int64
@@ -152,6 +154,7 @@ func writeAgentMetrics(m *metricsWriter, cfg envConfig) {
 	m.add("awg_peer_policy_drift_total", "counter", "AWG peer policy drifts repaired by reconcile.", "", awgPeerPolicyDriftTotal.Load())
 	m.add("tw_worker_uapi_errors_total", "counter", "Failed AWG UAPI operations.", "", uapiErrorsTotal.Load())
 	m.add("tw_worker_xray_api_errors_total", "counter", "Failed Xray API calls.", "", xrayAPIErrorsTotal.Load())
+	m.add("tw_worker_telemetry_relay_limited_total", "counter", "Telemetry relay posts refused by the relay rate limits.", "", telemetryRelayLimitedTotal.Load())
 	m.add("tw_worker_orch_applied_seq", "gauge", "Worker config sequence applied by this worker.", "", orchAppliedSeqGauge.Load())
 	m.add("tw_worker_orch_desired_seq", "gauge", "Latest worker config sequence announced by the orchestrator.", "", orchDesiredSeqGauge.Load())
 	m.add("tw_worker_orch_last_success_timestamp_seconds", "gauge", "Unix time of the last successful orchestrator request.", "", orchLastSuccessUnix.Load())

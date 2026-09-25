@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -118,6 +119,7 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 }
 
 func telemetryHandler(cfg envConfig, st stateFile) http.HandlerFunc {
+	limiter := newRelayLimiter()
 	// One client for the handler's lifetime keeps the HTTPS connection to the
 	// orchestrator alive between telemetry posts.
 	var (
@@ -143,6 +145,14 @@ func telemetryHandler(cfg envConfig, st stateFile) http.HandlerFunc {
 			return
 		}
 		defer r.Body.Close()
+		release, wait := limiter.acquire(r.Header.Get("X-TW-Device"))
+		if release == nil {
+			telemetryRelayLimitedTotal.Add(1)
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(wait)))
+			writeTelemetryError(w, http.StatusTooManyRequests, "rate_limited")
+			return
+		}
+		defer release()
 		raw, err := io.ReadAll(io.LimitReader(r.Body, telemetryMaxBodyBytes+1))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -187,6 +197,14 @@ var newTelemetryClient = func(cfg envConfig, st stateFile) (telemetryClient, err
 
 func isDeviceNotApprovedError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "device is not approved")
+}
+
+// writeTelemetryError answers with the structured {error: code} body clients
+// classify by.
+func writeTelemetryError(w http.ResponseWriter, status int, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(`{"error":"` + code + `"}`))
 }
 
 func writeDeviceNotApprovedResponse(w http.ResponseWriter) {

@@ -1,5 +1,16 @@
 server_tokens off;
 
+# Every REALITY client reaches this server from the Xray container's address,
+# so there are no per-IP limits: telemetry is limited per device header, and
+# the rest only by generous totals. APK downloads have their own connection
+# cap so they cannot take the slots config.json and the manifest need.
+limit_req_zone $http_x_tw_device zone=tw_telemetry_device:1m rate=20r/m;
+limit_req_zone $server_name zone=tw_telemetry_all:64k rate=2r/s;
+limit_conn_zone $server_name zone=tw_conn_all:64k;
+limit_conn_zone $server_name zone=tw_conn_apk:64k;
+limit_req_status 429;
+limit_conn_status 429;
+
 server {
     listen 9443 ssl http2;
     server_name _;
@@ -17,6 +28,12 @@ server {
     listen 0.0.0.0:8080;
     server_name _;
     client_max_body_size 128k;
+    client_header_timeout 10s;
+    client_body_timeout 10s;
+    send_timeout 30s;
+    keepalive_timeout 30s;
+    keepalive_requests 100;
+    limit_conn tw_conn_all 512;
 
     location = /healthz {
         allow 127.0.0.1;
@@ -26,6 +43,11 @@ server {
     }
 
     location = /tw/telemetry {
+        limit_req zone=tw_telemetry_device burst=10 nodelay;
+        limit_req zone=tw_telemetry_all burst=20 nodelay;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 10s;
+        proxy_read_timeout 45s;
         proxy_pass http://agent:9090/orchestrator/telemetry;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -36,6 +58,11 @@ server {
         proxy_set_header X-TW-Ts $http_x_tw_ts;
         proxy_set_header X-TW-Nonce $http_x_tw_nonce;
         proxy_set_header X-TW-Sig $http_x_tw_sig;
+    }
+
+    location ~ ^/tw/[^/]+\.apk$ {
+        root /worker-state/distributor;
+        limit_conn tw_conn_apk 32;
     }
 
     location /tw/ {

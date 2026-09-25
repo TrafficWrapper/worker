@@ -68,6 +68,9 @@ func selfCheckStatus() string {
 	if xrayConfigRejected.Load() {
 		failed = append(failed, "xray_config")
 	}
+	if applyIncomplete() {
+		failed = append(failed, "apply")
+	}
 	if len(failed) == 0 {
 		return "ok"
 	}

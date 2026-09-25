@@ -10,7 +10,7 @@ Usage: ./uninstall.sh [--yes] [--keep-state] [--purge-images]
 
   -y, --yes        do not ask for confirmation
   --keep-state     keep ./worker-state (keys, certificates, peers)
-  --purge-images   also remove locally built images and named volumes
+  --purge-images   also remove the worker images and named volumes
 USAGE
 }
 
@@ -55,10 +55,17 @@ backup_state() {
   echo "backup written to $PWD/$archive"
 }
 
+# The smoke profile is included so its container and image go too. Every
+# service image is a worker-* image, so --rmi all removes only the worker's
+# own images, whether built locally or pulled from a release.
+down_args=(--profile smoke down --remove-orphans)
 if [ "$purge_images" = "1" ]; then
-  $COMPOSE down --remove-orphans --rmi local -v || true
-else
-  $COMPOSE down --remove-orphans || true
+  down_args+=(--rmi all -v)
+fi
+if ! $COMPOSE "${down_args[@]}"; then
+  echo "error: '$COMPOSE ${down_args[*]}' failed; the worker may still be running." >&2
+  echo "Nothing was deleted: ./worker-state and .env are unchanged. Fix the error and re-run." >&2
+  exit 1
 fi
 
 if command -v nft >/dev/null; then

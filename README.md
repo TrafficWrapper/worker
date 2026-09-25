@@ -318,8 +318,9 @@ sudo tar -czf worker-backup-$(date -u +%Y%m%dT%H%M%SZ).tgz worker-state .env
 
 `./uninstall.sh` writes the same archive (`worker-state-backup-<UTC>.tgz`)
 before deleting state. Flags: `--yes` (no prompt, required without a TTY),
-`--keep-state`, `--purge-images` (also removes locally built images and the
-`awg-run` volume).
+`--keep-state`, `--purge-images` (also removes the `worker-*` images, built or
+pulled, and the named volumes). If `docker compose down` fails, it stops with
+an error and deletes nothing.
 
 Move a worker to another host: stop it (`docker compose down`), copy the
 archive, clone the same release on the new host, extract the archive into the

@@ -128,6 +128,11 @@ func (d desiredState) awgDevices(now time.Time) []approvedDevice {
 	return filterUnexpiredApprovedDevices(d.devices, now)
 }
 
+// realityIntentionallyEmpty is awgIntentionallyEmpty for REALITY users.
+func (d desiredState) realityIntentionallyEmpty() bool {
+	return d.revoked || (d.signed && (!d.realityEnabled || d.input == 0))
+}
+
 // awgIntentionallyEmpty tells the anti-wipe guards that an empty AWG set is
 // what the orchestrator asked for rather than a lost or damaged cache.
 func (d desiredState) awgIntentionallyEmpty() bool {

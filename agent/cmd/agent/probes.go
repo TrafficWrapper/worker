@@ -65,6 +65,12 @@ func selfCheckStatus() string {
 	if platformClockSkewed() {
 		failed = append(failed, "clock")
 	}
+	if distributorUnreachable.Load() {
+		failed = append(failed, "distributor")
+	}
+	if resolverUnreachable.Load() {
+		failed = append(failed, "dns")
+	}
 	if xrayConfigRejected.Load() {
 		failed = append(failed, "xray_config")
 	}

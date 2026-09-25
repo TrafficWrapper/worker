@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/amnezia-vpn/amneziawg-go/tun"
 )
@@ -175,5 +178,50 @@ func TestHealthcheckRequiresExplicitConfig(t *testing.T) {
 	}
 	if len(*ran) != 0 {
 		t.Fatalf("commands ran without a config: %v", *ran)
+	}
+}
+
+type scriptedListener struct {
+	steps []func() (net.Conn, error)
+	i     int
+}
+
+func (l *scriptedListener) Accept() (net.Conn, error) {
+	step := l.steps[l.i]
+	l.i++
+	return step()
+}
+func (l *scriptedListener) Close() error   { return nil }
+func (l *scriptedListener) Addr() net.Addr { return nil }
+
+type countingHandler struct{ handled chan net.Conn }
+
+func (h countingHandler) IpcHandle(c net.Conn) { h.handled <- c }
+
+func TestServeUAPISurvivesTransientAcceptErrors(t *testing.T) {
+	oldMin, oldMax := uapiAcceptMinDelay, uapiAcceptMaxDelay
+	uapiAcceptMinDelay, uapiAcceptMaxDelay = time.Millisecond, 2*time.Millisecond
+	t.Cleanup(func() { uapiAcceptMinDelay, uapiAcceptMaxDelay = oldMin, oldMax })
+	client, server := net.Pipe()
+	defer client.Close()
+	l := &scriptedListener{steps: []func() (net.Conn, error){
+		func() (net.Conn, error) { return nil, syscall.EMFILE },
+		func() (net.Conn, error) { return nil, syscall.EMFILE },
+		func() (net.Conn, error) { return server, nil },
+		func() (net.Conn, error) { return nil, net.ErrClosed },
+	}}
+	h := countingHandler{handled: make(chan net.Conn, 1)}
+	errs := make(chan error, 1)
+	serveUAPI(h, l, errs)
+	select {
+	case c := <-h.handled:
+		if c != server {
+			t.Fatal("wrong connection handled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("connection after transient errors not handled")
+	}
+	if err := <-errs; !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("serveUAPI ended with %v", err)
 	}
 }

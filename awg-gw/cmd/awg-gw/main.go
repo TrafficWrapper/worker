@@ -255,16 +255,37 @@ func awgLogLevel(value string) (int, error) {
 	}
 }
 
-func serveUAPI(dev *device.Device, uapi net.Listener, errs chan<- error) {
+// serveUAPI accepts UAPI connections until the listener is closed. A failed
+// Accept (for example running out of file descriptors) is retried with a
+// short backoff instead of stopping the gateway and every tunnel with it.
+func serveUAPI(dev uapiHandler, uapi net.Listener, errs chan<- error) {
+	delay := uapiAcceptMinDelay
 	for {
 		c, err := uapi.Accept()
 		if err != nil {
-			errs <- err
-			return
+			if errors.Is(err, net.ErrClosed) {
+				errs <- err
+				return
+			}
+			fmt.Fprintf(os.Stderr, "uapi accept failed, retrying in %s: %v\n", delay, err)
+			time.Sleep(delay)
+			delay = min(delay*2, uapiAcceptMaxDelay)
+			continue
 		}
+		delay = uapiAcceptMinDelay
 		go dev.IpcHandle(c)
 	}
 }
+
+// uapiHandler is the part of *device.Device serveUAPI needs.
+type uapiHandler interface {
+	IpcHandle(net.Conn)
+}
+
+var (
+	uapiAcceptMinDelay = 50 * time.Millisecond
+	uapiAcceptMaxDelay = 5 * time.Second
+)
 
 func applyDeviceConfig(dev *device.Device, cfg Config) error {
 	peers, err := loadActivePeers(cfg.PeerRegistry, time.Now().UTC())

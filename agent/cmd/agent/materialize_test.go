@@ -1097,8 +1097,13 @@ func keyB64(seed byte) string {
 }
 
 func TestAWGRegistryDedupesKeysByBytes(t *testing.T) {
-	canonical := "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
-	sameKey := "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyB=" // unused trailing bits set
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	canonical := base64.StdEncoding.EncodeToString(raw)
+	// The same key with the unused trailing bits of the last character set.
+	sameKey := canonical[:len(canonical)-2] + "B="
 	cfg := envConfig{AWGSubnet: "10.13.13.0/24", AWGGateway: "10.13.13.1"}
 	devices := []approvedDevice{
 		{DeviceID: "a", AWGPublicKey: canonical, InternalIP: "10.13.13.10/32", PSK2: keyB64(6), Status: "approved"},

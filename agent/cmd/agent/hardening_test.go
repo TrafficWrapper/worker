@@ -305,6 +305,9 @@ func TestReadEnvRejectsInvalidValues(t *testing.T) {
 		"orch key":    {"ORCH_URL": "https://orch.example:9091"},
 		"smoke flag":  {"WORKER_SMOKE_PEERS": "yes"},
 		"placeholder": {"CAMOUFLAGE_DOMAIN": "example.com"},
+		"smtp flag":   {"WORKER_BLOCK_SMTP": "2"},
+		"bt flag":     {"WORKER_BLOCK_BITTORRENT": "enable"},
+		"egress flag": {"WORKER_ALLOW_PRIVATE_EGRESS": "y"},
 	}
 	for name, overrides := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -330,6 +333,42 @@ func TestReadEnvRejectsInvalidValues(t *testing.T) {
 	}
 	if !cfg.DisableSmokePeers || cfg.RealityDest != "www.example.net:443" {
 		t.Fatalf("orchestrated defaults wrong: smoke_disabled=%t dest=%q", cfg.DisableSmokePeers, cfg.RealityDest)
+	}
+}
+
+// The agent and awg-gw must read the blocking switches the same way: "true"
+// used to turn SMTP and BitTorrent blocking off for REALITY clients only.
+func TestReadEnvBlockingSwitchesUseStrictBool(t *testing.T) {
+	t.Setenv("WORKER_STATE_DIR", t.TempDir())
+	t.Setenv("EGRESS_IP", "203.0.113.10")
+	t.Setenv("CAMOUFLAGE_DOMAIN", "www.example.net")
+	cases := []struct {
+		value   string
+		block   bool
+		private bool
+	}{
+		{value: "", block: true, private: false},
+		{value: "true", block: true, private: true},
+		{value: "YES", block: true, private: true},
+		{value: "on", block: true, private: true},
+		{value: "1", block: true, private: true},
+		{value: "false", block: false, private: false},
+		{value: "off", block: false, private: false},
+		{value: "0", block: false, private: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("WORKER_BLOCK_SMTP", tc.value)
+			t.Setenv("WORKER_BLOCK_BITTORRENT", tc.value)
+			t.Setenv("WORKER_ALLOW_PRIVATE_EGRESS", tc.value)
+			cfg, err := readEnv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.BlockSMTP != tc.block || cfg.BlockBitTorrent != tc.block || cfg.AllowPrivateEgress != tc.private {
+				t.Fatalf("value %q: smtp=%t bt=%t private=%t", tc.value, cfg.BlockSMTP, cfg.BlockBitTorrent, cfg.AllowPrivateEgress)
+			}
+		})
 	}
 }
 

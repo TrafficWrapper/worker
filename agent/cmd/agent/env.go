@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/TrafficWrapper/worker/core/awg/serverpeer"
 )
 
 type envConfig struct {
@@ -135,7 +137,9 @@ func readEnv() (envConfig, error) {
 	default:
 		return envConfig{}, errors.New("WORKER_SMOKE_PEERS must be 0 or 1")
 	}
-	cfg.AllowPrivateEgress = getenv("WORKER_ALLOW_PRIVATE_EGRESS", "0") == "1"
+	if cfg.AllowPrivateEgress, err = serverpeer.EnvBool("WORKER_ALLOW_PRIVATE_EGRESS", false); err != nil {
+		return envConfig{}, err
+	}
 	cfg.RealityProbeAddr = getenv("REALITY_PROBE_ADDR", defaultRealityAddr)
 	cfg.DNSEnabled = getenv("WORKER_DNS", "0") == "1"
 	if cfg.PublicAddressV6, err = publicAddressV6(getenv("PUBLIC_ADDRESS_V6", "")); err != nil {
@@ -144,8 +148,14 @@ func readEnv() (envConfig, error) {
 	if cfg.RealityProfiles, err = parseRealityProfiles(os.Getenv("REALITY_INBOUNDS")); err != nil {
 		return envConfig{}, err
 	}
-	cfg.BlockSMTP = getenv("WORKER_BLOCK_SMTP", "1") == "1"
-	cfg.BlockBitTorrent = getenv("WORKER_BLOCK_BITTORRENT", "1") == "1"
+	// awg-gw parses the same switches with the same parser, so REALITY and
+	// AWG clients always get the same blocking.
+	if cfg.BlockSMTP, err = serverpeer.EnvBool("WORKER_BLOCK_SMTP", true); err != nil {
+		return envConfig{}, err
+	}
+	if cfg.BlockBitTorrent, err = serverpeer.EnvBool("WORKER_BLOCK_BITTORRENT", true); err != nil {
+		return envConfig{}, err
+	}
 	ackInterval, err := time.ParseDuration(getenv("ORCH_ACK_INTERVAL", "90s"))
 	if err != nil || ackInterval < 10*time.Second || ackInterval > time.Hour {
 		return envConfig{}, errors.New("ORCH_ACK_INTERVAL must be a duration between 10s and 1h")

@@ -388,9 +388,32 @@ var privateDestinations6 = []string{
 	"ff00::/8",
 }
 
+// isolationSettings are the client egress switches. They are parsed with the
+// same strict parser as the agent's, so AWG and REALITY clients get the same
+// blocking for any value.
+type isolationSettings struct {
+	BlockPrivate bool
+	BlockSMTP    bool
+}
+
+func isolationFromEnv() (isolationSettings, error) {
+	allowPrivate, err := serverpeer.EnvBool("WORKER_ALLOW_PRIVATE_EGRESS", false)
+	if err != nil {
+		return isolationSettings{}, err
+	}
+	blockSMTP, err := serverpeer.EnvBool("WORKER_BLOCK_SMTP", true)
+	if err != nil {
+		return isolationSettings{}, err
+	}
+	return isolationSettings{BlockPrivate: !allowPrivate, BlockSMTP: blockSMTP}, nil
+}
+
 func configureClientIsolation(name string) error {
-	allowPrivate := strings.TrimSpace(os.Getenv("WORKER_ALLOW_PRIVATE_EGRESS")) == "1"
-	blockSMTP := strings.TrimSpace(os.Getenv("WORKER_BLOCK_SMTP")) != "0"
+	settings, err := isolationFromEnv()
+	if err != nil {
+		return err
+	}
+	allowPrivate, blockSMTP := !settings.BlockPrivate, settings.BlockSMTP
 	if allowPrivate && !blockSMTP {
 		fmt.Println("client_isolation=disabled by WORKER_ALLOW_PRIVATE_EGRESS=1")
 		return nil

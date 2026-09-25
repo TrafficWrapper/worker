@@ -110,6 +110,9 @@ jobs:
           bash tests/install_release_test.sh
           bash tests/install_nft_test.sh
 
+      - name: dpi_probe tests
+        run: python3 -m unittest discover -s tools
+
   docker:
     runs-on: ubuntu-latest
     steps:

@@ -19,6 +19,9 @@ func run(cfg envConfig) error {
 	if err != nil {
 		return err
 	}
+	if err := checkSelfDescribe(cfg, st); err != nil {
+		return err
+	}
 	var orch *orchClient
 	if cfg.OrchURL != "" {
 		if orch, err = prepareOrchestrator(cfg, st); err != nil {

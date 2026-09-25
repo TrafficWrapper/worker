@@ -15,6 +15,7 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 	reality := map[string]any{
 		"transport":   "REALITY",
 		"address":     cfg.PublicAddress,
+		"address_v6":  cfg.PublicAddressV6,
 		"port":        cfg.XrayPort,
 		"serverName":  cfg.CamouflageDomain,
 		"server_name": cfg.CamouflageDomain,
@@ -80,8 +81,8 @@ func selfDescribe(cfg envConfig, st stateFile) map[string]any {
 			"noise_xk_ready":  true,
 			"pull_ready":      true,
 			"nudge_ack_ready": true,
-			"max_seen_seq":    0,
 		},
+		"capabilities": append([]string(nil), workerCapabilities...),
 	}
 	if apk := distributedAPKInfo(cfg.StateDir); len(apk) > 0 {
 		out["distributed_apk"] = apk
@@ -126,8 +127,12 @@ func distributedAPKInfo(stateDir string) map[string]any {
 		if err := json.Unmarshal(raw, &root); err != nil {
 			continue
 		}
+		seq := int64FromAny(root["seq"])
 		if nested, ok := root["distributed_apk"].(map[string]any); ok {
 			root = nested
+		}
+		if v := int64FromAny(root["seq"]); v > 0 {
+			seq = v
 		}
 		apk := map[string]any{}
 		if v := stringFromAny(root["apk_sha256"]); v != "" {
@@ -143,6 +148,9 @@ func distributedAPKInfo(stateDir string) map[string]any {
 			apk["apk_name"] = filepath.Base(v)
 		}
 		if len(apk) > 0 {
+			if seq > 0 {
+				apk["seq"] = seq
+			}
 			return apk
 		}
 	}

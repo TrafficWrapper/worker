@@ -71,8 +71,9 @@ type orchEnrollResponse struct {
 }
 
 type orchPullRequest struct {
-	WorkerID string `json:"worker_id"`
-	HaveSeq  int64  `json:"have_seq"`
+	WorkerID           string   `json:"worker_id"`
+	HaveSeq            int64    `json:"have_seq"`
+	WorkerCapabilities []string `json:"worker_capabilities,omitempty"`
 }
 
 type orchPullResponse struct {
@@ -367,7 +368,7 @@ func (c *orchClient) enroll(ctx context.Context, token string, self map[string]a
 
 func (c *orchClient) pull(ctx context.Context, workerID string, have int64) (orchPullResponse, error) {
 	var resp orchPullResponse
-	err := c.noiseCall(ctx, "/w/v1/config/pull", orchPullRequest{WorkerID: workerID, HaveSeq: have}, &resp)
+	err := c.noiseCall(ctx, "/w/v1/config/pull", orchPullRequest{WorkerID: workerID, HaveSeq: have, WorkerCapabilities: workerCapabilities}, &resp)
 	return resp, err
 }
 

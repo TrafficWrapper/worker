@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,10 +84,10 @@ func run(cfg envConfig) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	})
-	goWorker(func() { runDistributorCertRenewal(ctx, cfg) })
-	goWorker(func() { runHealthProbes(ctx, cfg) })
+	goWorker(func() { supervise(ctx, "cert renewal", func() { runDistributorCertRenewal(ctx, cfg) }) })
+	goWorker(func() { supervise(ctx, "health probes", func() { runHealthProbes(ctx, cfg) }) })
 	if cfg.OrchURL != "" {
-		goWorker(func() { runOrchestratorLoop(ctx, cfg, st, orch) })
+		goWorker(func() { supervise(ctx, "orchestrator loop", func() { runOrchestratorLoop(ctx, cfg, st, orch) }) })
 	}
 	slog.Info("worker-agent started", "standalone", cfg.OrchURL == "", "self_describe", ":9090/self-describe", "orch_url", cfg.OrchURL)
 	err = srv.ListenAndServe()
@@ -102,6 +103,35 @@ func run(cfg envConfig) error {
 }
 
 const shutdownGracePeriod = 10 * time.Second
+
+// supervisePanicDelay is the pause before a background loop that panicked is
+// started again.
+var supervisePanicDelay = 30 * time.Second
+
+// supervise runs a background loop and restarts it after a panic, so a bad
+// input (a malformed bundle, a surprising answer) cannot take the whole
+// agent and its health endpoint down in a crash loop.
+func supervise(ctx context.Context, name string, fn func()) {
+	for ctx.Err() == nil {
+		if !runRecovered(name, fn) {
+			return
+		}
+		sleepCtx(ctx, supervisePanicDelay)
+	}
+}
+
+// runRecovered runs fn and reports whether it panicked.
+func runRecovered(name string, fn func()) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			backgroundPanicsTotal.Add(1)
+			slog.Error("background loop panicked; restarting it", "loop", name, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	fn()
+	return false
+}
 
 // waitTimeout reports whether wg finished within d.
 func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {

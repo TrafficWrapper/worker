@@ -23,6 +23,7 @@ func run(cfg envConfig) error {
 	if err := checkSelfDescribe(cfg, st); err != nil {
 		return err
 	}
+	checkXHTTPHosts(cfg)
 	var orch *orchClient
 	if cfg.OrchURL != "" {
 		if orch, err = prepareOrchestrator(cfg, st); err != nil {

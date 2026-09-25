@@ -171,3 +171,25 @@ func TestXrayConfigWithoutShortIDsIsNeverWritten(t *testing.T) {
 		t.Fatalf("self_check %q does not report the refused config", selfCheckStatus())
 	}
 }
+
+func TestXHTTPHostMismatchIsReported(t *testing.T) {
+	t.Cleanup(func() { xhttpHostMismatch.Store(false) })
+	base := envConfig{CamouflageDomain: "www.example.net", XrayNetwork: "xhttp", XHTTPPath: "/x"}
+	if got := checkXHTTPHosts(base); len(got) != 0 || strings.Contains(selfCheckStatus(), "xhttp_host") {
+		t.Fatalf("default host flagged: %v", got)
+	}
+	same := base
+	same.XHTTPHost = "WWW.EXAMPLE.NET"
+	if got := checkXHTTPHosts(same); len(got) != 0 {
+		t.Fatalf("same host in other case flagged: %v", got)
+	}
+	other := base
+	other.XHTTPHost = "cdn.example.org"
+	other.RealityProfiles = []realityProfile{{Name: "xh", Network: "xhttp", XHTTPPath: "/y", XHTTPHost: "other.example.org"}, {Name: "tcp2", Network: "tcp"}}
+	if got := checkXHTTPHosts(other); strings.Join(got, ",") != "reality,xh" {
+		t.Fatalf("mismatched profiles %v", got)
+	}
+	if !strings.Contains(selfCheckStatus(), "xhttp_host") {
+		t.Fatalf("self_check %q", selfCheckStatus())
+	}
+}

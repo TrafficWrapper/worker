@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -167,7 +168,13 @@ func publicAddressV6(value string) (string, error) {
 	case "":
 		return "", nil
 	case "auto":
-		return detectPublicIPv6(), nil
+		addr := detectPublicIPv6()
+		if addr == "" {
+			// The default Compose network has no IPv6, so this usually fails;
+			// install.sh resolves "auto" on the host instead.
+			slog.Warn("PUBLIC_ADDRESS_V6=auto found no IPv6 from inside the container; no IPv6 endpoint is advertised. Run install.sh on the host or set the address explicitly")
+		}
+		return addr, nil
 	}
 	addr, err := netip.ParseAddr(strings.Trim(value, "[]"))
 	if err != nil || !addr.Is6() || addr.Is4In6() || !isPublicIP(addr.String()) {

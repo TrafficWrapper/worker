@@ -91,6 +91,9 @@ type orchPullResponse struct {
 	Update                   *orchUpdateArtifact `json:"update,omitempty"`
 	OrchestratorCapabilities []string            `json:"orchestrator_capabilities,omitempty"`
 	UpdateRef                *orchUpdateRef      `json:"update_ref,omitempty"`
+	// DiscoveryBundle is the signed discovery feed clients fetch through
+	// the tunnel as /tw/endpoints.json.
+	DiscoveryBundle *orchDiscoveryBundle `json:"discovery_bundle,omitempty"`
 }
 
 type orchAckRequest struct {
@@ -298,6 +301,11 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				state.Status = pull.Status
 				if pull.UpdateRef != nil {
 					apk.handle(ctx, cfg, client, state.WorkerID, *pull.UpdateRef)
+				}
+				if pull.DiscoveryBundle != nil {
+					if err := publishDiscoveryBundle(cfg.StateDir, *pull.DiscoveryBundle); err != nil {
+						slog.Warn("discovery feed not published", "err", err)
+					}
 				}
 				if pull.NotModified {
 					persist(state)
@@ -521,6 +529,7 @@ func removeDistributedArtifacts(stateDir string) error {
 		switch {
 		case name == "config.json", name == "config.json.minisig",
 			name == "update-manifest.json", name == "update-manifest.json.minisig",
+			name == "endpoints.json", name == "endpoints.json.minisig",
 			name == "version.json", strings.HasSuffix(name, ".apk"):
 		default:
 			continue

@@ -85,7 +85,8 @@ services:
     mem_limit: 512m
     pids_limit: 512
     healthcheck:
-      test: ["CMD", "/usr/local/bin/awg-gw", "healthcheck"]
+      # Same --config as the command, so the checked interface is the served one.
+      test: ["CMD", "/usr/local/bin/awg-gw", "healthcheck", "--config", "/worker-state/awg/awg-gw.json"]
       interval: 10s
       timeout: 5s
       retries: 6

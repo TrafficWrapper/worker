@@ -74,7 +74,7 @@ func main() {
 	case "run":
 		err = runGateway(configPath(args))
 	case "healthcheck":
-		err = runHealthcheck()
+		err = runHealthcheck(args)
 	case "validate-config":
 		err = validateConfigCommand(configPath(args))
 	case "show-config":
@@ -91,12 +91,25 @@ func main() {
 }
 
 func configPath(args []string) string {
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--config" && i+1 < len(args) {
-			return args[i+1]
-		}
+	if path, ok := configFlag(args); ok {
+		return path
 	}
 	return defaultConfig
+}
+
+// configFlag returns the value of --config and whether it was given.
+func configFlag(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--config" && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+// runCommand runs a host networking command (ip, nft, tc); tests replace it.
+var runCommand = func(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
 }
 
 func runStub() error {
@@ -498,20 +511,30 @@ func forwardingEnabled(path string) bool {
 	return err == nil && strings.TrimSpace(string(raw)) == "1"
 }
 
-func runHealthcheck() error {
-	if _, err := os.Stat(defaultConfig); err == nil {
-		cfg, err := loadConfig(defaultConfig)
-		if err != nil {
-			return err
+// runHealthcheck checks the interface of the config given with --config, the
+// same flag "run" takes, so a gateway started with another config is not
+// reported by the state of the base interface. Without the flag a missing
+// default config means stub mode; a config named explicitly must exist.
+func runHealthcheck(args []string) error {
+	path, explicit := configFlag(args)
+	if !explicit {
+		path = defaultConfig
+	}
+	if _, err := os.Stat(path); err != nil {
+		if explicit {
+			return fmt.Errorf("healthcheck config: %w", err)
 		}
-		cmd := exec.Command("ip", "link", "show", "dev", cfg.Interface)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("healthcheck ip link: %w: %s", err, strings.TrimSpace(string(out)))
-		}
-		fmt.Println("awg-gw run mode healthy")
+		fmt.Println("awg-gw stub healthy")
 		return nil
 	}
-	fmt.Println("awg-gw stub healthy")
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return err
+	}
+	if out, err := runCommand("ip", "link", "show", "dev", cfg.Interface); err != nil {
+		return fmt.Errorf("healthcheck ip link: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	fmt.Printf("awg-gw run mode healthy interface=%s\n", cfg.Interface)
 	return nil
 }
 

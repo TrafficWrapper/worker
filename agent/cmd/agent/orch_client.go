@@ -79,6 +79,7 @@ type orchPullRequest struct {
 type orchPullResponse struct {
 	OK           bool                `json:"ok"`
 	Error        string              `json:"error,omitempty"`
+	Code         string              `json:"code,omitempty"`
 	Status       string              `json:"status,omitempty"`
 	WorkerID     string              `json:"worker_id,omitempty"`
 	DesiredSeq   int64               `json:"desired_seq,omitempty"`
@@ -116,6 +117,8 @@ type orchTelemetryRequest struct {
 type orchNudgeResponse struct {
 	OK         bool   `json:"ok"`
 	Error      string `json:"error,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Code       string `json:"code,omitempty"`
 	DesiredSeq int64  `json:"desired_seq,omitempty"`
 	Heartbeat  bool   `json:"heartbeat,omitempty"`
 }
@@ -123,6 +126,8 @@ type orchNudgeResponse struct {
 type orchAckResponse struct {
 	OK            bool   `json:"ok"`
 	Error         string `json:"error,omitempty"`
+	Status        string `json:"status,omitempty"`
+	Code          string `json:"code,omitempty"`
 	DesiredSeq    int64  `json:"desired_seq,omitempty"`
 	AppliedSeq    int64  `json:"applied_seq,omitempty"`
 	EgressIPProbe string `json:"egress_ip_probe,omitempty"`
@@ -175,6 +180,9 @@ const (
 	// orchForcedPullInterval re-checks the config even when nudges keep
 	// reporting nothing new.
 	orchForcedPullInterval = 10 * time.Minute
+	// orchRevokedRetry is how often a revoked worker asks again; revocation is
+	// terminal, so this only keeps the log honest.
+	orchRevokedRetry = time.Hour
 )
 
 // backoff is an exponential delay with full jitter, reset after success.
@@ -236,10 +244,24 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				orchDesiredSeqGauge.Store(pull.DesiredSeq)
 			}
 			if !pull.OK {
+				if orchRevoked(pull.Status, pull.Code) {
+					enterRevokedState(cfg, st, &state)
+					sleepCtx(ctx, orchRevokedRetry)
+					continue
+				}
 				state.Status = pull.Status
 				_ = saveOrchState(cfg.StateDir, state)
 				slog.Warn("orch pull pending/error", "status", pull.Status, "error", pull.Error)
 				sleepCtx(ctx, retry.next())
+				continue
+			}
+			if state.Status == orchStatusRevoked {
+				// Serving again needs the full config, not a diff against
+				// the one dropped at revocation.
+				slog.Warn("orch reports the worker is no longer revoked; re-pulling the full config", "status", pull.Status)
+				state.Status = pull.Status
+				state.AppliedSeq = 0
+				_ = saveOrchState(cfg.StateDir, state)
 				continue
 			}
 			state.Status = pull.Status
@@ -278,6 +300,10 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			sleepCtx(ctx, retry.next())
 			continue
 		}
+		if !nudge.OK && orchRevoked(nudge.Status, nudge.Code) {
+			pullNeeded = true
+			continue
+		}
 		retry.reset()
 		if nudge.DesiredSeq > 0 {
 			orchDesiredSeqGauge.Store(nudge.DesiredSeq)
@@ -305,9 +331,13 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 }
 
 func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st stateFile, workerID string, seq, clientSeq int64) {
-	devices := cachedApprovedDevices(cfg.StateDir)
-	approvedDevicesGauge.Store(int64(len(filterUnexpiredApprovedDevices(devices, time.Now().UTC()))))
-	usage := collectWorkerUsageReports(cfg, devices)
+	ds := cachedDesiredState(cfg.StateDir)
+	if ds.revoked {
+		approvedDevicesGauge.Store(0)
+	} else {
+		approvedDevicesGauge.Store(int64(len(filterUnexpiredApprovedDevices(ds.devices, time.Now().UTC()))))
+	}
+	usage := collectWorkerUsageReports(cfg, ds)
 	ack, err := client.ack(ctx, orchAckRequest{
 		WorkerID:         workerID,
 		AppliedVersion:   seq,
@@ -322,6 +352,10 @@ func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st st
 		slog.Warn("orch ack failed", "err", err)
 		return
 	}
+	if !ack.OK {
+		slog.Warn("orch ack rejected", "status", ack.Status, "code", ack.Code, "error", ack.Error)
+		return
+	}
 	if ack.QuotaBlocks > 0 {
 		quotaBlocksTotal.Add(uint64(ack.QuotaBlocks))
 	}
@@ -334,12 +368,81 @@ func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st st
 	}
 }
 
-func collectWorkerUsageReports(cfg envConfig, devices []approvedDevice) []orchUsageReport {
-	usage, err := collectAWGUsageReports(cfg, devices)
+// collectWorkerUsageReports reports traffic for the protocols this worker
+// serves. Expired devices stay in the lookup so their last traffic is still
+// attributed to them.
+// orchRevoked recognizes a revocation answer: status revoked, or the
+// structured code on orchestrators that send one.
+func orchRevoked(status, code string) bool {
+	return status == orchStatusRevoked || code == "worker_revoked"
+}
+
+// enterRevokedState stops serving: the revoked status is persisted first so
+// startup renders honor it, then device credentials are removed from Xray
+// and AWG, Xray is restarted to end open sessions, and the published client
+// config and APK are deleted.
+func enterRevokedState(cfg envConfig, st stateFile, state *orchState) {
+	first := state.Status != orchStatusRevoked
+	state.Status = orchStatusRevoked
+	if err := saveOrchState(cfg.StateDir, *state); err != nil {
+		slog.Error("orch revoked: saving state failed", "err", err)
+	}
+	if err := applyDesiredState(cfg, st, desiredState{revoked: true}); err != nil {
+		slog.Error("orch revoked: removing device credentials failed", "err", err)
+	}
+	if err := removeDistributedArtifacts(cfg.StateDir); err != nil {
+		slog.Error("orch revoked: removing distributed files failed", "err", err)
+	}
+	if first {
+		// Removing users live keeps their open connections; a restart ends them.
+		if err := requestXrayRestart(cfg); err != nil {
+			slog.Error("orch revoked: xray restart request failed", "err", err)
+		}
+		slog.Error("orchestrator revoked this worker; device credentials and distributed files removed")
+	}
+}
+
+// removeDistributedArtifacts deletes what clients download from this worker:
+// the signed client config, the update manifest and APKs.
+func removeDistributedArtifacts(stateDir string) error {
+	twDir := filepath.Join(stateDir, "distributor", "tw")
+	entries, err := os.ReadDir(twDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case name == "config.json", name == "config.json.minisig",
+			name == "update-manifest.json", name == "update-manifest.json.minisig",
+			name == "version.json", strings.HasSuffix(name, ".apk"):
+		default:
+			continue
+		}
+		if err := os.Remove(filepath.Join(twDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func collectWorkerUsageReports(cfg envConfig, ds desiredState) []orchUsageReport {
+	var awgDevices, realityDevices []approvedDevice
+	if !ds.revoked && ds.awgEnabled {
+		awgDevices = ds.devices
+	}
+	if !ds.revoked && ds.realityEnabled {
+		realityDevices = ds.devices
+	}
+	usage, err := collectAWGUsageReports(cfg, awgDevices)
 	if err != nil {
 		slog.Warn("awg usage report skipped", "err", err)
 	}
-	reality, err := collectRealityUsageReports(cfg, devices)
+	reality, err := collectRealityUsageReports(cfg, realityDevices)
 	if err != nil {
 		slog.Warn("reality usage report skipped", "err", err)
 	} else {
@@ -505,6 +608,18 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 	if err != nil {
 		return 0, 0, err
 	}
+	if err := checkWorkerConfigIdentity(workerBundle.ConfigJSON, state.WorkerID); err != nil {
+		return 0, 0, err
+	}
+	// Check the device list before the bundle replaces the cached one, so a
+	// rejected bundle is not picked up by the next startup render either.
+	ds, err := parseDesiredState(workerBundle.ConfigJSON)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := ds.checkRejections(); err != nil {
+		return 0, 0, err
+	}
 	clientSeq := state.ClientAppliedSeq
 	clientBundleOK := false
 	if nextClientSeq, err := verifyOrchBundleAllowEqual(clientBundle, state.SignerPublicKey, state.ClientAppliedSeq, "client-config-v1"); err != nil {
@@ -532,7 +647,7 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 			return 0, 0, err
 		}
 	}
-	if err := materializeApprovedDevices(cfg, st, workerBundle.ConfigJSON); err != nil {
+	if err := applyDesiredState(cfg, st, ds); err != nil {
 		return 0, 0, err
 	}
 	version := map[string]any{"version": fmt.Sprintf("orch-v%d", seq), "config_seq": seq, "created_at": time.Now().UTC().Format(time.RFC3339)}

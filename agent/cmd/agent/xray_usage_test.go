@@ -74,12 +74,12 @@ func TestCollectWorkerUsageReportsKeepsAWGWhenXrayStatsUnavailable(t *testing.T)
 		StateDir:      t.TempDir(),
 		AWGUAPISocket: socketPath,
 	}
-	reports := collectWorkerUsageReports(cfg, []approvedDevice{{
+	reports := collectWorkerUsageReports(cfg, desiredState{realityEnabled: true, awgEnabled: true, devices: []approvedDevice{{
 		DeviceID:     "device-a",
 		RealityUUID:  "uuid-a",
 		AWGPublicKey: pub,
 		Status:       "approved",
-	}})
+	}}})
 	if len(reports) != 1 || reports[0].AWGPublicKey != pub || reports[0].RxBytes != 10 || reports[0].TxBytes != 20 {
 		t.Fatalf("AWG usage lost when Xray stats unavailable: %+v", reports)
 	}

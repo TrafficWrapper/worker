@@ -62,6 +62,9 @@ func selfCheckStatus() string {
 	if h.Reality != nil && !h.Reality.OK {
 		failed = append(failed, "reality")
 	}
+	if platformClockSkewed() {
+		failed = append(failed, "clock")
+	}
 	if len(failed) == 0 {
 		return "ok"
 	}

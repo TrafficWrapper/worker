@@ -375,6 +375,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			slog.Debug("orch nudge heartbeat", "desired", nudge.DesiredSeq, "applied", state.AppliedSeq)
 		}
 		if time.Since(lastAck) >= cfg.OrchAckInterval {
+			probeTunnelServices(cfg)
 			reportOrchAck(ctx, client, cfg, st, state.WorkerID, state.AppliedSeq, state.ClientAppliedSeq)
 			if err := cleanupDistributedAPKs(cfg.StateDir, apk.inProgress()); err != nil {
 				slog.Warn("distributor cleanup incomplete", "err", err)

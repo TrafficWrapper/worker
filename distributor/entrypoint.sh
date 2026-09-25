@@ -34,4 +34,27 @@ cert_stamp() {
   done
 ) &
 
-exec nginx -g 'daemon off;'
+nginx -g 'daemon off;' &
+nginx_pid=$!
+trap 'kill -TERM "$nginx_pid" 2>/dev/null' TERM INT
+
+# This container shares the awg-gw network namespace. When awg-gw restarts it
+# gets a new one and this container is left in the old namespace without the
+# tunnel. Exit then, so Docker restarts it inside the current one.
+missing=0
+while kill -0 "$nginx_pid" 2>/dev/null; do
+  sleep 10 &
+  wait $! 2>/dev/null || true
+  if ip addr | grep -q "${AWG_GATEWAY}/"; then
+    missing=0
+  else
+    missing=$((missing + 1))
+  fi
+  if [ "$missing" -ge 3 ]; then
+    echo "tunnel gateway ${AWG_GATEWAY} is gone from this network namespace; restarting" >&2
+    kill -TERM "$nginx_pid" 2>/dev/null || true
+    wait "$nginx_pid" 2>/dev/null || true
+    exit 1
+  fi
+done
+wait "$nginx_pid"

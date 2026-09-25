@@ -140,6 +140,9 @@ func telemetryHandler(cfg envConfig, st stateFile) http.HandlerFunc {
 		return cached, nil
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Clients sign X-TW-Ts with this offset instead of trusting their
+		// own clock.
+		w.Header().Set("X-TW-Server-Time", strconv.FormatInt(platformNow().UnixMilli(), 10))
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -154,33 +157,38 @@ func telemetryHandler(cfg envConfig, st stateFile) http.HandlerFunc {
 		}
 		defer release()
 		raw, err := io.ReadAll(io.LimitReader(r.Body, telemetryMaxBodyBytes+1))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if len(raw) == 0 || len(raw) > telemetryMaxBodyBytes || !json.Valid(raw) {
-			http.Error(w, "invalid telemetry payload", http.StatusBadRequest)
+		if err != nil || len(raw) == 0 || len(raw) > telemetryMaxBodyBytes || !json.Valid(raw) {
+			writeTelemetryError(w, http.StatusUnprocessableEntity, "invalid_payload")
 			return
 		}
 		state := loadOrchState(cfg.StateDir)
-		if state.WorkerID == "" {
-			http.Error(w, "worker is not enrolled", http.StatusServiceUnavailable)
+		switch {
+		case state.Status == orchStatusRevoked:
+			writeTelemetryError(w, http.StatusServiceUnavailable, "worker_revoked")
+			return
+		case state.WorkerID == "":
+			writeTelemetryError(w, http.StatusServiceUnavailable, "worker_pending")
 			return
 		}
 		client, err := getClient()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			slog.Warn("telemetry relay unavailable", "err", err)
+			writeTelemetryError(w, http.StatusServiceUnavailable, "orchestrator_unavailable")
 			return
 		}
 		headers := telemetryHeadersFromRequest(r)
 		if err := client.telemetry(r.Context(), state.WorkerID, raw, headers); err != nil {
-			if isDeviceNotApprovedError(err) {
+			status, code := telemetryRelayResponse(err)
+			if status == http.StatusForbidden {
 				slog.Warn("telemetry forward rejected: device is not approved")
 				writeDeviceNotApprovedResponse(w)
 				return
 			}
-			slog.Warn("telemetry forward failed", "err", err)
-			http.Error(w, "telemetry forward failed", http.StatusBadGateway)
+			slog.Warn("telemetry forward failed", "status", status, "code", code, "err", err)
+			if status == http.StatusTooManyRequests {
+				w.Header().Set("Retry-After", "5")
+			}
+			writeTelemetryError(w, status, code)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -195,8 +203,71 @@ var newTelemetryClient = func(cfg envConfig, st stateFile) (telemetryClient, err
 	return newOrchClient(cfg, st)
 }
 
-func isDeviceNotApprovedError(err error) bool {
-	return err != nil && strings.Contains(strings.ToLower(err.Error()), "device is not approved")
+// Telemetry rejection codes the orchestrator sends, and what the relay
+// answers for them. Clients drop 422, reauthenticate only on 403 with
+// device_not_approved, and retry 429 and 5xx.
+var telemetryCodeStatus = map[string]int{
+	"device_not_approved": http.StatusForbidden,
+	"stale_timestamp":     http.StatusUnprocessableEntity,
+	"replay":              http.StatusUnprocessableEntity,
+	"bad_signature":       http.StatusUnprocessableEntity,
+	"unknown_device":      http.StatusUnprocessableEntity,
+	"invalid_payload":     http.StatusUnprocessableEntity,
+	"worker_revoked":      http.StatusServiceUnavailable,
+	"worker_pending":      http.StatusServiceUnavailable,
+	"rate_limited":        http.StatusTooManyRequests,
+}
+
+// telemetryRelayResponse maps a failed forward to the relay's HTTP status
+// and error code. Orchestrators without structured codes are mapped by
+// their error texts; an unrecognized rejection is not retried.
+func telemetryRelayResponse(err error) (int, string) {
+	if strings.Contains(strings.ToLower(err.Error()), "device is not approved") {
+		return http.StatusForbidden, "device_not_approved"
+	}
+	var rejected *orchRejectedError
+	if errors.As(err, &rejected) {
+		if status, ok := telemetryCodeStatus[rejected.code]; ok {
+			return status, rejected.code
+		}
+		if rejected.code != "" {
+			return http.StatusUnprocessableEntity, "rejected"
+		}
+		code := legacyTelemetryCode(rejected.status, rejected.message)
+		return telemetryCodeStatus[code], code
+	}
+	var unavailable *orchUnavailableError
+	if errors.As(err, &unavailable) {
+		if unavailable.httpStatus == http.StatusTooManyRequests {
+			return http.StatusTooManyRequests, "rate_limited"
+		}
+		return http.StatusServiceUnavailable, "orchestrator_unavailable"
+	}
+	return http.StatusBadGateway, "orchestrator_unreachable"
+}
+
+func legacyTelemetryCode(status, message string) string {
+	msg := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(msg, "device is not approved"):
+		return "device_not_approved"
+	case status == orchStatusRevoked:
+		return "worker_revoked"
+	case status == "pending":
+		return "worker_pending"
+	case strings.Contains(msg, "freshness window"), strings.Contains(msg, "timestamp"):
+		return "stale_timestamp"
+	case strings.Contains(msg, "replay"):
+		return "replay"
+	case strings.Contains(msg, "signature"):
+		return "bad_signature"
+	case strings.HasPrefix(msg, "unknown device"):
+		return "unknown_device"
+	default:
+		// "invalid telemetry payload", other "telemetry ..." texts, "worker
+		// identity mismatch" and anything unknown.
+		return "invalid_payload"
+	}
 }
 
 // writeTelemetryError answers with the structured {error: code} body clients

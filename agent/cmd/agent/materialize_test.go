@@ -736,6 +736,41 @@ func TestReconcileAWGPeersAntiWipeRejectsEmptyAppliedDesiredState(t *testing.T) 
 	}
 }
 
+func TestRenderAWGWritesWorkerAddresses(t *testing.T) {
+	cfg := envConfig{
+		StateDir:        t.TempDir(),
+		AWGPort:         51888,
+		AWGSubnet:       "10.13.13.0/24",
+		AWGGateway:      "10.13.13.1",
+		AWGUAPISocket:   "/var/run/wireguard/awg1.sock",
+		EgressIP:        "203.0.113.10",
+		PublicAddress:   "vpn.example.net",
+		PublicAddressV6: "2001:db8::1",
+	}
+	st := stateFile{AWG: awgState{
+		SmokePublic:   keyB64(1),
+		SmokePSK:      keyB64(2),
+		SmokeIP:       "10.13.13.2/32",
+		PublicKey:     keyB64(3),
+		PrivateKey:    keyB64(4),
+		PrivateKeyHex: strings.Repeat("0", 64),
+	}}
+	if err := renderAWG(cfg, st); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(defaultAWGInboundProfile(cfg).configPath(cfg.StateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered serverpeer.GatewayConfig
+	if err := json.Unmarshal(raw, &rendered); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(rendered.WorkerAddresses, ","); got != "203.0.113.10,2001:db8::1" {
+		t.Fatalf("rendered worker_addresses=%q: %s", got, raw)
+	}
+}
+
 func TestRenderAWGPropagatesServerKeepalivePolicy(t *testing.T) {
 	cfg := envConfig{
 		StateDir:           t.TempDir(),

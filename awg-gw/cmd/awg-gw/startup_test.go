@@ -119,6 +119,54 @@ func TestGatewayDoesNotStartWithoutIsolation(t *testing.T) {
 	}
 }
 
+func TestGatewayBlocksWorkerAddressesFromTunnel(t *testing.T) {
+	t.Setenv("WORKER_ALLOW_PRIVATE_EGRESS", "")
+	t.Setenv("WORKER_BLOCK_SMTP", "")
+	t.Setenv("AWG_LOG_LEVEL", "silent")
+	cfg := validTestConfig()
+	cfg.WorkerAddresses = []string{"203.0.113.10", "198.51.100.7", "2001:db8::1"}
+	path := writeTestConfig(t, cfg)
+
+	ran := fakeCommands(t, nil)
+	before := fakeTUN(t, ran)
+	if err := runGateway(path); err == nil || !strings.Contains(err.Error(), "fake TUN stop") {
+		t.Fatalf("runGateway error=%v, want the fake TUN failure", err)
+	}
+	rules := strings.Join(*before, "\n")
+	for _, want := range []string{
+		"forward iifname awg1 ip daddr { 203.0.113.10, 198.51.100.7 } drop",
+		"forward iifname awg1 ip6 daddr { 2001:db8::1 } drop",
+	} {
+		if !strings.Contains(rules, want) {
+			t.Fatalf("worker address rule %q missing:\n%s", want, rules)
+		}
+	}
+
+	// The private egress opt-out lifts this block like the private ranges.
+	t.Setenv("WORKER_ALLOW_PRIVATE_EGRESS", "1")
+	ran = fakeCommands(t, nil)
+	before = fakeTUN(t, ran)
+	_ = runGateway(path)
+	if rules := strings.Join(*before, "\n"); strings.Contains(rules, "203.0.113.10") || !strings.Contains(rules, "dport") {
+		t.Fatalf("private egress opt-out must keep only the SMTP rule:\n%s", rules)
+	}
+}
+
+func TestValidateConfigRejectsNonIPWorkerAddresses(t *testing.T) {
+	for _, value := range []string{"worker.example.net", "203.0.113.10/32", "fe80::1%eth0", ""} {
+		cfg := validTestConfig()
+		cfg.WorkerAddresses = []string{value}
+		if err := validateConfig(cfg); err == nil {
+			t.Fatalf("worker address %q accepted", value)
+		}
+	}
+	cfg := validTestConfig()
+	cfg.WorkerAddresses = []string{"203.0.113.10", "2001:db8::1"}
+	if err := validateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHealthcheckRequiresExplicitConfig(t *testing.T) {
 	ran := fakeCommands(t, nil)
 	missing := filepath.Join(t.TempDir(), "missing.json")

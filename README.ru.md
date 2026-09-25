@@ -243,7 +243,7 @@ binaries:
 | `WORKER_BLOCK_SMTP` | Блокирует клиентам исходящую почту на порты 25/465/587 (Xray и AWG). | Опц. | `1` | Оставьте `1`: спам с IP воркера приводит к блокировке хоста. |
 | `WORKER_BLOCK_BITTORRENT` | Блокирует BitTorrent для REALITY-клиентов (включает sniffing Xray с `routeOnly`). | Опц. | `1` | Оставьте `1`, чтобы хостер не получал DMCA-жалобы. |
 | `REALITY_PROBE_ADDR` | Адрес, по которому агент проверяет свой REALITY-листенер как цензор без ключа клиента. | Опц. | `xray:8443` | Оставьте default Compose. |
-| `WORKER_ALLOW_PRIVATE_EGRESS` | Разрешает VPN-клиентам доступ к приватным, loopback, link-local (cloud metadata) и внутренним Docker-адресам через воркер. | Опц. | `0` | Оставьте `0`: такие диапазоны блокируют и роутинг Xray, и forward-фильтр `awg-gw`. |
+| `WORKER_ALLOW_PRIVATE_EGRESS` | Разрешает VPN-клиентам доступ к приватным, loopback, link-local (cloud metadata) и внутренним Docker-адресам, а также к собственным публичным адресам воркера. | Опц. | `0` | Оставьте `0`: такие диапазоны блокируют и роутинг Xray, и forward-фильтр `awg-gw`. |
 | `WORKER_SMOKE_PEERS` | Встроенные smoke-учётки (`p0-smoke` в REALITY и smoke-пир AWG). | Опц. | включены в standalone, выключены при `ORCH_URL` | `1` — оставить на воркере с оркестратором для `awg-smoke`, `0` — выключить. |
 | `XRAY_PORT` | Public TCP port, mapped to REALITY container. | Опц. | выбирает `install.sh` (fallback Compose `2053`) | `install.sh` берёт 443, если свободен, иначе случайный порт 20000-59999, и сохраняет его при повторных запусках. |
 | `AWG_PORT` | Public UDP port для AWG. | Опц. | выбирает `install.sh` (fallback Compose `51888`) | Случайный свободный UDP-порт 20000-59999, сохраняется при повторных запусках. |
@@ -411,7 +411,8 @@ cosign verify ghcr.io/trafficwrapper/worker-agent:v1.2.3 \
   artifacts.
 - Используйте уникальный deployment dialect; worker state генерируется локально.
 - Клиенты не могут через воркер обращаться к приватным, loopback, link-local
-  и внутренним Docker-адресам (API агента, `/metrics`, хост, cloud metadata),
+  и внутренним Docker-адресам, а также к собственным публичным адресам воркера
+  (API агента, `/metrics`, хост, cloud metadata),
   пока не задан `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray выбрасывает приватные
   адреса из ответов DNS и подключается к адресу, который сам разрешил (только
   IPv4), поэтому имя не может смениться на приватный адрес между проверкой

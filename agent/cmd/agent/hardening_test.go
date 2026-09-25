@@ -230,6 +230,39 @@ func TestXrayRoutingBlocksPrivateDestinationsByDefault(t *testing.T) {
 	}
 }
 
+func TestWorkerAddressesKeepOnlyLiteralIPs(t *testing.T) {
+	cfg := envConfig{EgressIP: "203.0.113.10", PublicAddress: "vpn.example.net", PublicAddressV6: "2001:db8::1"}
+	if got := strings.Join(workerAddresses(cfg), ","); got != "203.0.113.10,2001:db8::1" {
+		t.Fatalf("workerAddresses=%q", got)
+	}
+	cfg = envConfig{EgressIP: "203.0.113.10", PublicAddress: "198.51.100.7"}
+	if got := strings.Join(workerAddresses(cfg), ","); got != "203.0.113.10,198.51.100.7" {
+		t.Fatalf("workerAddresses=%q", got)
+	}
+	cfg = envConfig{EgressIP: "203.0.113.10", PublicAddress: "203.0.113.10", PublicAddressV6: "[::ffff:203.0.113.10]"}
+	if got := strings.Join(workerAddresses(cfg), ","); got != "203.0.113.10" {
+		t.Fatalf("duplicates not removed: %q", got)
+	}
+}
+
+func TestXrayRoutingBlocksWorkerOwnAddresses(t *testing.T) {
+	cfg := envConfig{EgressIP: "203.0.113.10", PublicAddress: "198.51.100.7", PublicAddressV6: "2001:db8::1"}
+	raw, _ := json.Marshal(xrayRouting(cfg))
+	for _, want := range []string{`"203.0.113.10"`, `"198.51.100.7"`, `"2001:db8::1"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("routing does not block worker address %s: %s", want, raw)
+		}
+	}
+	if strings.Count(strings.Join(privateEgressCIDRs, ","), "203.0.113.10") != 0 {
+		t.Fatal("worker addresses leaked into the shared private CIDR list")
+	}
+	cfg.AllowPrivateEgress = true
+	open, _ := json.Marshal(xrayRouting(cfg))
+	if strings.Contains(string(open), "203.0.113.10") {
+		t.Fatalf("private egress opt-out still blocks worker addresses: %s", open)
+	}
+}
+
 func TestXrayConfigOmitsSmokeUserWhenDisabledAndDedupesEmails(t *testing.T) {
 	cfg := envConfig{RealityDest: "example.com:443", CamouflageDomain: "example.com", DisableSmokePeers: true}
 	doc := xrayConfigDocument(cfg, hardeningTestState(), []approvedDevice{

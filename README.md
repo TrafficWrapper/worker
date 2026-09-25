@@ -241,7 +241,7 @@ binaries:
 | `WORKER_BLOCK_SMTP` | Blocks outbound mail ports 25/465/587 for clients (Xray and AWG). | Optional | `1` | Keep `1`: spam from a worker IP gets the host blacklisted. |
 | `WORKER_BLOCK_BITTORRENT` | Blocks BitTorrent for REALITY clients (enables Xray sniffing with `routeOnly`). | Optional | `1` | Keep `1` to avoid DMCA notices to the hosting provider. |
 | `REALITY_PROBE_ADDR` | Address the agent uses to probe its own REALITY listener like a censor without a client key. | Optional | `xray:8443` | Keep the Compose default. |
-| `WORKER_ALLOW_PRIVATE_EGRESS` | Lets VPN clients reach private, loopback, link-local (cloud metadata) and Docker-internal addresses through the worker. | Optional | `0` | Keep `0`: both Xray routing and the `awg-gw` forward filter block those ranges. |
+| `WORKER_ALLOW_PRIVATE_EGRESS` | Lets VPN clients reach private, loopback, link-local (cloud metadata) and Docker-internal addresses, and the worker's own public addresses, through the worker. | Optional | `0` | Keep `0`: both Xray routing and the `awg-gw` forward filter block those ranges. |
 | `WORKER_SMOKE_PEERS` | Built-in smoke credentials (`p0-smoke` REALITY user and AWG smoke peer). | Optional | enabled standalone, disabled with `ORCH_URL` | `1` to keep them on an orchestrated worker for `awg-smoke`, `0` to disable. |
 | `XRAY_PORT` | Public TCP port mapped to the REALITY container. | Optional | chosen by `install.sh` (Compose fallback `2053`) | `install.sh` takes 443 when free, otherwise a random port in 20000-59999, and keeps it on re-runs. |
 | `AWG_PORT` | Public UDP port mapped to AWG. | Optional | chosen by `install.sh` (Compose fallback `51888`) | A random free UDP port in 20000-59999, kept on re-runs. |
@@ -409,8 +409,8 @@ inspected with `docker buildx imagetools inspect <image> --format '{{ json .Prov
   artifacts.
 - Use a unique deployment dialect; the worker state is generated locally.
 - Clients cannot reach private, loopback, link-local or Docker-internal
-  addresses through the worker (agent API, `/metrics`, the host, cloud metadata)
-  unless `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray drops private answers from DNS
+  addresses, or the worker's own public addresses, through the worker (agent
+  API, `/metrics`, the host, cloud metadata) unless `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray drops private answers from DNS
   and dials the address it resolved itself (IPv4 only), so a name cannot switch
   to a private address between the routing check and the connection.
 - When the orchestrator switches a protocol off (`desired_state.reality.enabled`

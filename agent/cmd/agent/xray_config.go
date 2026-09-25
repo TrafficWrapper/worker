@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -299,7 +300,7 @@ func xrayRouting(cfg envConfig) map[string]any {
 		},
 		map[string]any{
 			"type":        "field",
-			"ip":          privateEgressCIDRs,
+			"ip":          append(slices.Clone(privateEgressCIDRs), workerAddresses(cfg)...),
 			"outboundTag": "block",
 		},
 	)

@@ -166,7 +166,11 @@ func runGateway(path string) error {
 	if err != nil {
 		return err
 	}
-	if err := configureClientIsolation(cfg.Interface, isolation); err != nil {
+	workers, err := parseWorkerAddresses(cfg.WorkerAddresses)
+	if err != nil {
+		return err
+	}
+	if err := configureClientIsolation(cfg.Interface, isolation, workers); err != nil {
 		return err
 	}
 
@@ -177,7 +181,7 @@ func runGateway(path string) error {
 	realName, err := tdev.Name()
 	if err == nil && realName != "" && realName != cfg.Interface {
 		cfg.Interface = realName
-		if err := configureClientIsolation(cfg.Interface, isolation); err != nil {
+		if err := configureClientIsolation(cfg.Interface, isolation, workers); err != nil {
 			tdev.Close()
 			return err
 		}
@@ -434,13 +438,17 @@ func isolationFromEnv() (isolationSettings, error) {
 
 // configureClientIsolation fails when a required rule cannot be installed, so
 // the gateway never serves clients without the filter.
-func configureClientIsolation(name string, settings isolationSettings) error {
+func configureClientIsolation(name string, settings isolationSettings, workers []netip.Addr) error {
 	allowPrivate, blockSMTP := !settings.BlockPrivate, settings.BlockSMTP
 	if allowPrivate && !blockSMTP {
 		fmt.Println("client_isolation=disabled by WORKER_ALLOW_PRIVATE_EGRESS=1")
 		return nil
 	}
-	for _, args := range clientIsolationCommands(name, !allowPrivate, blockSMTP) {
+	commands := clientIsolationCommands(name, !allowPrivate, blockSMTP)
+	if !allowPrivate {
+		commands = append(commands, workerAddressCommands(name, workers)...)
+	}
+	for _, args := range commands {
 		out, err := runCommand(args[0], args[1:]...)
 		if err != nil {
 			msg := strings.TrimSpace(string(out))
@@ -450,8 +458,46 @@ func configureClientIsolation(name string, settings isolationSettings) error {
 			return fmt.Errorf("%s failed: %w: %s", strings.Join(args, " "), err, msg)
 		}
 	}
-	fmt.Printf("client_isolation=enabled iface=%s private=%t smtp=%t\n", name, !allowPrivate, blockSMTP)
+	fmt.Printf("client_isolation=enabled iface=%s private=%t smtp=%t worker_addresses=%d\n", name, !allowPrivate, blockSMTP, len(workers))
 	return nil
+}
+
+// workerAddressCommands drop client traffic to the worker's own public
+// addresses: through them clients would reach services published on the
+// host, which the private ranges do not cover. Must follow
+// clientIsolationCommands, which creates the chain.
+func workerAddressCommands(name string, workers []netip.Addr) [][]string {
+	table := natTableName(name) + "_isolation"
+	var v4, v6 []string
+	for _, addr := range workers {
+		if addr.Is4() {
+			v4 = append(v4, addr.String())
+		} else {
+			v6 = append(v6, addr.String())
+		}
+	}
+	var commands [][]string
+	if len(v4) > 0 {
+		commands = append(commands, []string{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip", "daddr", "{", strings.Join(v4, ", "), "}", "drop"})
+	}
+	if len(v6) > 0 {
+		commands = append(commands, []string{"nft", "add", "rule", "inet", table, "forward", "iifname", name, "ip6", "daddr", "{", strings.Join(v6, ", "), "}", "drop"})
+	}
+	return commands
+}
+
+// parseWorkerAddresses accepts only literal IPs without a zone; the agent
+// never writes anything else, so any other value is a config error.
+func parseWorkerAddresses(values []string) ([]netip.Addr, error) {
+	addrs := make([]netip.Addr, 0, len(values))
+	for _, value := range values {
+		addr, err := netip.ParseAddr(value)
+		if err != nil || addr.Zone() != "" {
+			return nil, fmt.Errorf("worker_addresses: %q is not an IP address", value)
+		}
+		addrs = append(addrs, addr.Unmap())
+	}
+	return addrs, nil
 }
 
 func clientIsolationCommands(name string, blockPrivate, blockSMTP bool) [][]string {
@@ -631,6 +677,9 @@ func validateConfig(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.PublicKey) == "" {
 		return errors.New("public_key must be set for reporting")
+	}
+	if _, err := parseWorkerAddresses(cfg.WorkerAddresses); err != nil {
+		return err
 	}
 	if err := awgdialect.Validate(cfg.Dialect, device.DefaultMTU); err != nil {
 		return err

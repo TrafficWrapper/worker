@@ -170,7 +170,7 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		"log":      map[string]any{"loglevel": "info"},
 		"inbounds": append(inbounds, apiInbound),
 		"outbounds": []any{
-			map[string]any{"tag": "direct", "protocol": "freedom"},
+			xrayDirectOutbound(cfg),
 			map[string]any{"tag": "block", "protocol": "blackhole"},
 		},
 		"api": map[string]any{
@@ -188,7 +188,39 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		"routing": xrayRouting(cfg),
 		"stats":   map[string]any{},
 	}
+	if dns := xrayDNS(cfg); dns != nil {
+		xcfg["dns"] = dns
+	}
 	return xcfg
+}
+
+// xrayDirectOutbound connects to the address Xray's own resolver returned.
+// With the default AsIs strategy freedom resolves the name again when it
+// dials, so a name that answers with a public address for routing and a
+// private one for the dial would get past the private-egress rule.
+// ForceIPv4 also fails the connection instead of falling back to the system
+// resolver when Xray's resolver has no usable answer.
+func xrayDirectOutbound(cfg envConfig) map[string]any {
+	outbound := map[string]any{"tag": "direct", "protocol": "freedom"}
+	if !cfg.AllowPrivateEgress {
+		outbound["settings"] = map[string]any{"domainStrategy": "ForceIPv4"}
+	}
+	return outbound
+}
+
+// xrayDNS drops private addresses from every answer, so a public name can
+// never resolve to the agent, the host or a metadata service.
+func xrayDNS(cfg envConfig) map[string]any {
+	if cfg.AllowPrivateEgress {
+		return nil
+	}
+	return map[string]any{
+		"queryStrategy": "UseIPv4",
+		"servers": []any{map[string]any{
+			"address":       "localhost",
+			"unexpectedIPs": privateEgressCIDRs,
+		}},
+	}
 }
 
 // privateEgressCIDRs are destinations that clients must not reach through the

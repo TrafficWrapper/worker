@@ -41,7 +41,9 @@ The worker agent exposes `/healthz`, `/self-describe`, and `/metrics` on the
 local agent port (`127.0.0.1:9090` through the default Compose mapping). The
 Prometheus metrics endpoint is intended for localhost scraping because AWG peer
 labels include public keys, allowed IPs, and endpoints unless
-`TW_METRICS_SCRUB_PEER_LABELS=1`. See [Monitoring](#monitoring).
+`TW_METRICS_SCRUB_PEER_LABELS=1`. `/self-describe` and `/metrics` answer only
+loopback, the Docker network gateway (the published host port) and
+`AGENT_API_ALLOW_CIDRS`; other containers get 404. See [Monitoring](#monitoring).
 
 Every service has a Docker healthcheck, so `docker compose ps` shows which one
 is not ready. Startup order is `agent` → `awg-gw` → `distributor` → `xray`.
@@ -244,6 +246,7 @@ binaries:
 | `XRAY_PORT` | Public TCP port mapped to the REALITY container. | Optional | `2053` | `8444`, `2053`, or another free TCP port. |
 | `AWG_PORT` | Public UDP port mapped to AWG. | Optional | `51888` | Any free UDP port. |
 | `AGENT_PORT` | Localhost TCP port exposing the worker agent health/API. | Optional | `9090` | `127.0.0.1:9090` by default. |
+| `AGENT_API_ALLOW_CIDRS` | Extra sources (comma-separated CIDRs or IPs) allowed to read `/self-describe` and `/metrics`. | Optional | empty | Set only for a scraper container on the Compose network; loopback and the host port work without it. |
 | `AWG_SUBNET` | Worker AWG subnet for device internal IPs. | Optional | `10.13.13.0/24` | Use a private subnet not colliding with your host. |
 | `AWG_GATEWAY` | AWG gateway address inside `AWG_SUBNET`. | Optional | first host in subnet | `10.13.13.1`. |
 | `AWG_UAPI_SOCKET` | WireGuard/AmneziaWG UAPI socket path. | Optional | `/var/run/wireguard/awg1.sock` | Usually set by Compose. |
@@ -399,7 +402,9 @@ inspected with `docker buildx imagetools inspect <image> --format '{{ json .Prov
 - Use a unique deployment dialect; the worker state is generated locally.
 - Clients cannot reach private, loopback, link-local or Docker-internal
   addresses through the worker (agent API, `/metrics`, the host, cloud metadata)
-  unless `WORKER_ALLOW_PRIVATE_EGRESS=1`.
+  unless `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray drops private answers from DNS
+  and dials the address it resolved itself (IPv4 only), so a name cannot switch
+  to a private address between the routing check and the connection.
 - Keep `APPLY_NFT=0` while testing. Review firewall/NAT rules before enabling it
   on a production server.
 - Worker enrollment tokens are one-time secrets; create them in the orchestrator

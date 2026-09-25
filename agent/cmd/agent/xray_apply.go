@@ -32,9 +32,9 @@ func requestXrayRestart(cfg envConfig) error {
 }
 
 // applyXrayConfig writes the rendered Xray config and makes the running Xray
-// pick it up. Changes that only touch the REALITY client list are applied live
-// through the Xray HandlerService so active sessions survive; anything else, or
-// a failed live update, falls back to a container restart.
+// pick it up. Changes that only add REALITY clients are applied live through
+// the Xray HandlerService so active sessions survive; anything else, or a
+// failed live update, falls back to a container restart.
 func applyXrayConfig(cfg envConfig, xrayRaw []byte, approvedDeviceCount int) error {
 	oldRaw, _ := os.ReadFile(xrayConfigPath(cfg))
 	xrayChanged := string(oldRaw) != string(xrayRaw)
@@ -86,6 +86,14 @@ func hotApplyXrayUsers(cfg envConfig, oldRaw, newRaw []byte) error {
 	diffs, err := diffXrayUsers(oldRaw, newRaw)
 	if err != nil {
 		return err
+	}
+	// Removing a user through the API keeps its open connections, so a
+	// revoked or blocked device would keep its sessions. Only additions are
+	// applied live; any removal or change restarts Xray.
+	for _, diff := range diffs {
+		if len(diff.Remove) > 0 {
+			return errXrayNeedsRestart
+		}
 	}
 	for _, diff := range diffs {
 		if err := applyXrayUserDiff(cfg, diff); err != nil {

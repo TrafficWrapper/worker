@@ -85,7 +85,9 @@ func TestCollectWorkerUsageReportsKeepsAWGWhenXrayStatsUnavailable(t *testing.T)
 	}
 }
 
-func TestQueryXrayStatsResetsCounters(t *testing.T) {
+// Counters are no longer reset by the query (WRK-M2): a reset before the
+// totals are saved loses traffic when saving fails.
+func TestQueryXrayStatsDoesNotResetCounters(t *testing.T) {
 	fx := &fakeXrayAPI{}
 	installFakeXrayAPI(t, fx)
 	raw, err := queryXrayStats(envConfig{})
@@ -95,7 +97,7 @@ func TestQueryXrayStatsResetsCounters(t *testing.T) {
 	if string(raw) != `{"stat":[]}` {
 		t.Fatalf("stats output=%q", raw)
 	}
-	if len(fx.calls) != 1 || fx.calls[0][0] != "statsquery" || !containsString(fx.calls[0], "-reset=true") {
+	if len(fx.calls) != 1 || fx.calls[0][0] != "statsquery" || containsString(fx.calls[0], "-reset=true") {
 		t.Fatalf("unexpected xray api call: %v", fx.calls)
 	}
 }

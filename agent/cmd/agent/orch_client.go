@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"aead.dev/minisign"
@@ -78,17 +79,18 @@ type orchPullRequest struct {
 }
 
 type orchPullResponse struct {
-	OK           bool                `json:"ok"`
-	Error        string              `json:"error,omitempty"`
-	Code         string              `json:"code,omitempty"`
-	Status       string              `json:"status,omitempty"`
-	WorkerID     string              `json:"worker_id,omitempty"`
-	DesiredSeq   int64               `json:"desired_seq,omitempty"`
-	NotModified  bool                `json:"not_modified,omitempty"`
-	WorkerBundle orchSignedConfig    `json:"worker_bundle,omitempty"`
-	ClientBundle orchSignedConfig    `json:"client_bundle,omitempty"`
-	Update       *orchUpdateArtifact `json:"update,omitempty"`
-	UpdateRef    *orchUpdateRef      `json:"update_ref,omitempty"`
+	OK                       bool                `json:"ok"`
+	Error                    string              `json:"error,omitempty"`
+	Code                     string              `json:"code,omitempty"`
+	Status                   string              `json:"status,omitempty"`
+	WorkerID                 string              `json:"worker_id,omitempty"`
+	DesiredSeq               int64               `json:"desired_seq,omitempty"`
+	NotModified              bool                `json:"not_modified,omitempty"`
+	WorkerBundle             orchSignedConfig    `json:"worker_bundle,omitempty"`
+	ClientBundle             orchSignedConfig    `json:"client_bundle,omitempty"`
+	Update                   *orchUpdateArtifact `json:"update,omitempty"`
+	OrchestratorCapabilities []string            `json:"orchestrator_capabilities,omitempty"`
+	UpdateRef                *orchUpdateRef      `json:"update_ref,omitempty"`
 }
 
 type orchAckRequest struct {
@@ -117,24 +119,26 @@ type orchTelemetryRequest struct {
 }
 
 type orchNudgeResponse struct {
-	OK         bool   `json:"ok"`
-	Error      string `json:"error,omitempty"`
-	Status     string `json:"status,omitempty"`
-	Code       string `json:"code,omitempty"`
-	DesiredSeq int64  `json:"desired_seq,omitempty"`
-	Heartbeat  bool   `json:"heartbeat,omitempty"`
+	OK                       bool     `json:"ok"`
+	Error                    string   `json:"error,omitempty"`
+	Status                   string   `json:"status,omitempty"`
+	Code                     string   `json:"code,omitempty"`
+	DesiredSeq               int64    `json:"desired_seq,omitempty"`
+	Heartbeat                bool     `json:"heartbeat,omitempty"`
+	OrchestratorCapabilities []string `json:"orchestrator_capabilities,omitempty"`
 }
 
 type orchAckResponse struct {
-	OK            bool   `json:"ok"`
-	Error         string `json:"error,omitempty"`
-	Status        string `json:"status,omitempty"`
-	Code          string `json:"code,omitempty"`
-	DesiredSeq    int64  `json:"desired_seq,omitempty"`
-	AppliedSeq    int64  `json:"applied_seq,omitempty"`
-	EgressIPProbe string `json:"egress_ip_probe,omitempty"`
-	EgressMatch   bool   `json:"egress_match"`
-	QuotaBlocks   int    `json:"quota_blocks,omitempty"`
+	OK                       bool     `json:"ok"`
+	Error                    string   `json:"error,omitempty"`
+	Status                   string   `json:"status,omitempty"`
+	Code                     string   `json:"code,omitempty"`
+	DesiredSeq               int64    `json:"desired_seq,omitempty"`
+	AppliedSeq               int64    `json:"applied_seq,omitempty"`
+	EgressIPProbe            string   `json:"egress_ip_probe,omitempty"`
+	EgressMatch              bool     `json:"egress_match"`
+	QuotaBlocks              int      `json:"quota_blocks,omitempty"`
+	OrchestratorCapabilities []string `json:"orchestrator_capabilities,omitempty"`
 }
 
 type orchUsageReport struct {
@@ -508,6 +512,13 @@ func collectWorkerUsageReports(cfg envConfig, ds desiredState) []orchUsageReport
 	if err != nil {
 		slog.Warn("awg usage report skipped", "err", err)
 	}
+	// Older orchestrators drop reports with a source they do not know, so
+	// AWG reports name their source only when the orchestrator accepts it.
+	if orchestratorHasCapability(capUsageSourceAWG) {
+		for i := range usage {
+			usage[i].Source = awgUsageSource
+		}
+	}
 	reality, err := collectRealityUsageReports(cfg, realityDevices)
 	if err != nil {
 		slog.Warn("reality usage report skipped", "err", err)
@@ -552,18 +563,27 @@ func (c *orchClient) enroll(ctx context.Context, token string, self map[string]a
 func (c *orchClient) pull(ctx context.Context, workerID string, have int64) (orchPullResponse, error) {
 	var resp orchPullResponse
 	err := c.noiseCall(ctx, "/w/v1/config/pull", orchPullRequest{WorkerID: workerID, HaveSeq: have, WorkerCapabilities: workerCapabilities}, &resp)
+	if err == nil {
+		recordOrchestratorCapabilities(resp.OrchestratorCapabilities)
+	}
 	return resp, err
 }
 
 func (c *orchClient) ack(ctx context.Context, req orchAckRequest) (orchAckResponse, error) {
 	var resp orchAckResponse
 	err := c.noiseCall(ctx, "/w/v1/ack", req, &resp)
+	if err == nil {
+		recordOrchestratorCapabilities(resp.OrchestratorCapabilities)
+	}
 	return resp, err
 }
 
 func (c *orchClient) nudge(ctx context.Context, workerID string, have int64, self map[string]any) (orchNudgeResponse, error) {
 	var resp orchNudgeResponse
 	err := c.noiseCall(ctx, "/w/v1/nudge/wait", orchNudgeRequest{WorkerID: workerID, HaveSeq: have, SelfDescribe: self}, &resp)
+	if err == nil {
+		recordOrchestratorCapabilities(resp.OrchestratorCapabilities)
+	}
 	return resp, err
 }
 
@@ -868,6 +888,32 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	case <-ctx.Done():
 	case <-t.C:
 	}
+}
+
+const (
+	capUsageSourceAWG = "usage_source_awg_v1"
+	awgUsageSource    = "awg"
+)
+
+// orchestratorCapabilities holds the list from the latest pull, nudge or ack
+// answer; an answer without it means an older orchestrator.
+var orchestratorCapabilities atomic.Pointer[[]string]
+
+func recordOrchestratorCapabilities(caps []string) {
+	orchestratorCapabilities.Store(&caps)
+}
+
+func orchestratorHasCapability(name string) bool {
+	caps := orchestratorCapabilities.Load()
+	if caps == nil {
+		return false
+	}
+	for _, c := range *caps {
+		if c == name {
+			return true
+		}
+	}
+	return false
 }
 
 // orchRejectedError is an ok:false answer the orchestrator decided on, with

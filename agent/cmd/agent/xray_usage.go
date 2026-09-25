@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -38,32 +37,37 @@ func collectRealityUsageReports(cfg envConfig, devices []approvedDevice) ([]orch
 	if err != nil {
 		return nil, err
 	}
-	deltas, err := buildRealityUsageReports(devices, raw)
+	counters, err := buildRealityUsageReports(devices, raw)
 	if err != nil {
 		return nil, err
 	}
 	state := loadUsageState(realityUsageStatePath(cfg.StateDir))
-	reports := accumulateRealityUsage(deltas, state, time.Now().UTC())
+	reports := accumulateRealityUsage(counters, state, time.Now().UTC())
+	// Totals that were not saved would be reported again lower next time,
+	// which the orchestrator reads as a counter reset and charges twice.
 	if err := saveUsageState(realityUsageStatePath(cfg.StateDir), state); err != nil {
-		slog.Warn("reality usage state save failed", "err", err)
+		return nil, fmt.Errorf("save reality usage state: %w", err)
 	}
 	return reports, nil
 }
 
-// accumulateRealityUsage adds the per-query deltas to the persisted totals and
-// reports the totals, matching the cumulative semantics of AWG usage reports.
-func accumulateRealityUsage(deltas []orchUsageReport, state usageState, now time.Time) []orchUsageReport {
-	reports := make([]orchUsageReport, 0, len(deltas))
-	for _, delta := range deltas {
-		key := realityUsageSource + ":" + delta.DeviceID
+// accumulateRealityUsage turns Xray's per-user counters into persisted totals
+// that never decrease. Xray counters only grow until Xray restarts, so a
+// value below the last one seen is traffic since that restart.
+func accumulateRealityUsage(counters []orchUsageReport, state usageState, now time.Time) []orchUsageReport {
+	reports := make([]orchUsageReport, 0, len(counters))
+	for _, counter := range counters {
+		key := realityUsageSource + ":" + counter.DeviceID
 		snap := state[key]
-		snap.RxBytes = addUint64Saturating(snap.RxBytes, delta.RxBytes)
-		snap.TxBytes = addUint64Saturating(snap.TxBytes, delta.TxBytes)
+		snap.RxBytes = addUint64Saturating(snap.RxBytes, counterDelta(snap.LastRxBytes, counter.RxBytes))
+		snap.TxBytes = addUint64Saturating(snap.TxBytes, counterDelta(snap.LastTxBytes, counter.TxBytes))
+		snap.LastRxBytes = counter.RxBytes
+		snap.LastTxBytes = counter.TxBytes
 		snap.UpdatedAt = now
 		state[key] = snap
-		delta.RxBytes = snap.RxBytes
-		delta.TxBytes = snap.TxBytes
-		reports = append(reports, delta)
+		counter.RxBytes = snap.RxBytes
+		counter.TxBytes = snap.TxBytes
+		reports = append(reports, counter)
 	}
 	state.prune(now)
 	return reports
@@ -164,11 +168,11 @@ func addUint64Saturating(a, b uint64) uint64 {
 	return a + b
 }
 
-// queryXrayStats reads and resets the per-user counters, so every call
-// returns the traffic since the previous call and an Xray restart in between
-// cannot make the reported totals go backwards.
+// queryXrayStats reads the per-user counters without resetting them: the
+// agent keeps the last values it saw, so nothing is lost when saving the
+// totals fails.
 func queryXrayStats(cfg envConfig) ([]byte, error) {
-	return runXrayAPI(cfg, xrayStatsQueryTimeout, "statsquery", "-pattern", "user>>>", "-reset=true")
+	return runXrayAPI(cfg, xrayStatsQueryTimeout, "statsquery", "-pattern", "user>>>")
 }
 
 // runXrayAPI runs the bundled xray CLI against the API socket shared with

@@ -22,9 +22,14 @@ type fakeOrchestrator struct {
 	key    noise.DHKey
 	handle func(path string, req json.RawMessage) any
 
+	// cookie, when set, is returned in the outer envelope of every
+	// successful /w/v1/* response, like the orchestrator's handshake cookie.
+	cookie string
+
 	mu       sync.Mutex
 	sessions map[string]*noise.HandshakeState
 	requests map[string][]json.RawMessage
+	starts   []json.RawMessage
 }
 
 func newFakeOrchestrator(t *testing.T, handle func(path string, req json.RawMessage) any) *fakeOrchestrator {
@@ -41,8 +46,13 @@ func newFakeOrchestrator(t *testing.T, handle func(path string, req json.RawMess
 
 func (f *fakeOrchestrator) serve(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/w/v1/handshake/start" {
+		var raw json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&raw)
 		var req orchStartRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.Unmarshal(raw, &req)
+		f.mu.Lock()
+		f.starts = append(f.starts, raw)
+		f.mu.Unlock()
 		hs, err := noise.NewHandshakeState(noise.Config{
 			CipherSuite:   protocol.CipherSuite(),
 			Pattern:       noise.HandshakeXK,
@@ -100,7 +110,10 @@ func (f *fakeOrchestrator) serve(w http.ResponseWriter, r *http.Request) {
 		f.t.Error(err)
 		return
 	}
-	writeJSON(w, orchEnvelopeResponse{OK: true, Payload: base64.StdEncoding.EncodeToString(encrypted)})
+	f.mu.Lock()
+	cookie := f.cookie
+	f.mu.Unlock()
+	writeJSON(w, orchEnvelopeResponse{OK: true, Payload: base64.StdEncoding.EncodeToString(encrypted), Cookie: cookie})
 }
 
 // requestsTo returns the decrypted requests the fake received on path.
@@ -108,6 +121,20 @@ func (f *fakeOrchestrator) requestsTo(path string) []json.RawMessage {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]json.RawMessage(nil), f.requests[path]...)
+}
+
+// startRequests returns the raw handshake start bodies the fake received.
+func (f *fakeOrchestrator) startRequests() []json.RawMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]json.RawMessage(nil), f.starts...)
+}
+
+// setCookie changes the handshake cookie the fake hands out.
+func (f *fakeOrchestrator) setCookie(v string) {
+	f.mu.Lock()
+	f.cookie = v
+	f.mu.Unlock()
 }
 
 // client returns an orchClient for a fresh worker identity talking to f.

@@ -90,6 +90,7 @@ type orchPullResponse struct {
 	ClientBundle             orchSignedConfig    `json:"client_bundle,omitempty"`
 	Update                   *orchUpdateArtifact `json:"update,omitempty"`
 	OrchestratorCapabilities []string            `json:"orchestrator_capabilities,omitempty"`
+	UpdateRef                *orchUpdateRef      `json:"update_ref,omitempty"`
 }
 
 type orchAckRequest struct {
@@ -219,6 +220,10 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 	state := loadOrchState(cfg.StateDir)
 	orchAppliedSeqGauge.Store(state.AppliedSeq)
 	retry := newBackoff(orchBackoffMin, orchBackoffMax)
+	apk := &apkDownloader{}
+	// A download in flight stops with ctx; wait for it so shutdown does not
+	// cut a file write short.
+	defer apk.wait()
 	var lastAck, lastPull time.Time
 	pullNeeded := true
 	// A failed state write is retried on every pass: losing the worker ID or
@@ -286,6 +291,9 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				continue
 			}
 			state.Status = pull.Status
+			if pull.UpdateRef != nil {
+				apk.handle(ctx, cfg, client, state.WorkerID, *pull.UpdateRef)
+			}
 			if !pull.NotModified {
 				started := time.Now()
 				seq, clientSeq, err := applyOrchBundles(cfg, st, state, pull.WorkerBundle, pull.ClientBundle, pull.Update)
@@ -341,6 +349,9 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 		}
 		if time.Since(lastAck) >= cfg.OrchAckInterval {
 			reportOrchAck(ctx, client, cfg, st, state.WorkerID, state.AppliedSeq, state.ClientAppliedSeq)
+			if err := cleanupDistributedAPKs(cfg.StateDir, apk.inProgress()); err != nil {
+				slog.Warn("distributor cleanup incomplete", "err", err)
+			}
 			reconcileStarted := time.Now()
 			if err := reconcileAWGPeers(cfg, st); err != nil {
 				slog.Warn("awg periodic reconcile incomplete", "err", err)
@@ -364,23 +375,37 @@ func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st st
 		approvedDevicesGauge.Store(int64(len(filterUnexpiredApprovedDevices(ds.devices, platformNow()))))
 	}
 	usage := collectWorkerUsageReports(cfg, ds)
-	ack, err := client.ack(ctx, orchAckRequest{
-		WorkerID:         workerID,
-		AppliedVersion:   seq,
-		SelfCheck:        selfCheckStatus(),
-		EgressIPObserved: cfg.EgressIP,
-		SelfDescribe:     selfDescribe(cfg, st),
-		Usage:            usage,
-		ClientAppliedSeq: clientSeq,
-	})
-	recordOrchRequest("ack", err)
-	if err != nil {
-		slog.Warn("orch ack failed", "err", err)
-		return
-	}
-	if !ack.OK {
-		slog.Warn("orch ack rejected", "status", ack.Status, "code", ack.Code, "error", ack.Error)
-		return
+	// The orchestrator caps the ack body, so a large worker sends its usage
+	// over several acks; only the first one carries self_describe.
+	batches := splitUsageReports(usage, maxUsageReportsPerAck)
+	var ack orchAckResponse
+	for i, batch := range batches {
+		req := orchAckRequest{
+			WorkerID:         workerID,
+			AppliedVersion:   seq,
+			SelfCheck:        selfCheckStatus(),
+			EgressIPObserved: cfg.EgressIP,
+			Usage:            batch,
+			ClientAppliedSeq: clientSeq,
+		}
+		if i == 0 {
+			req.SelfDescribe = selfDescribe(cfg, st)
+		}
+		resp, err := client.ack(ctx, req)
+		recordOrchRequest("ack", err)
+		if err != nil {
+			slog.Warn("orch ack failed", "err", err, "part", i+1, "parts", len(batches))
+			return
+		}
+		if !resp.OK {
+			slog.Warn("orch ack rejected", "status", resp.Status, "code", resp.Code, "error", resp.Error)
+			return
+		}
+		if i == 0 {
+			ack = resp
+		} else {
+			ack.QuotaBlocks += resp.QuotaBlocks
+		}
 	}
 	if ack.QuotaBlocks > 0 {
 		quotaBlocksTotal.Add(uint64(ack.QuotaBlocks))
@@ -397,6 +422,25 @@ func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st st
 // collectWorkerUsageReports reports traffic for the protocols this worker
 // serves. Expired devices stay in the lookup so their last traffic is still
 // attributed to them.
+// maxUsageReportsPerAck keeps one ack well under the orchestrator's 2 MiB
+// body limit (a report is a few hundred bytes).
+const maxUsageReportsPerAck = 2000
+
+// splitUsageReports cuts usage into acks of at most n reports; there is
+// always at least one, possibly empty, batch.
+func splitUsageReports(usage []orchUsageReport, n int) [][]orchUsageReport {
+	if len(usage) <= n {
+		return [][]orchUsageReport{usage}
+	}
+	var batches [][]orchUsageReport
+	for len(usage) > 0 {
+		k := min(n, len(usage))
+		batches = append(batches, usage[:k])
+		usage = usage[k:]
+	}
+	return batches
+}
+
 // orchRevoked recognizes a revocation answer: status revoked, or the
 // structured code on orchestrators that send one.
 func orchRevoked(status, code string) bool {
@@ -699,9 +743,11 @@ func applyOrchBundles(cfg envConfig, st stateFile, state orchState, workerBundle
 			return 0, 0, err
 		}
 	}
+	// A broken or oversized APK must not hold back the config: clients and
+	// the orchestrator see the old release in distributed_apk and retry.
 	if update != nil {
 		if err := writeUpdateArtifact(cfg, update); err != nil {
-			return 0, 0, err
+			slog.Warn("inline apk update not published", "err", err)
 		}
 	}
 	if err := applyDesiredState(cfg, st, ds); err != nil {
@@ -747,14 +793,19 @@ func writeUpdateArtifact(cfg envConfig, update *orchUpdateArtifact) error {
 	if declared := strings.ToLower(strings.TrimSpace(update.APKSHA256)); declared != "" && declared != apkSHA {
 		return errors.New("update artifact sha mismatch")
 	}
+	if manifestExpired(update.ManifestJSON, platformNow()) {
+		return errors.New("update manifest has expired")
+	}
+	// The APK goes first so a published manifest never points at a missing
+	// file.
 	twDir := filepath.Join(cfg.StateDir, "distributor", "tw")
-	if err := writeFile(filepath.Join(twDir, "update-manifest.json"), []byte(strings.TrimSpace(update.ManifestJSON)), 0o644); err != nil {
+	if err := writeFile(filepath.Join(twDir, apkName), apkRaw, 0o644); err != nil {
 		return err
 	}
-	if err := writeFile(filepath.Join(twDir, "update-manifest.json.minisig"), []byte(strings.TrimSpace(update.ManifestMinisig)), 0o644); err != nil {
+	if err := publishUpdateManifest(cfg.StateDir, update.ManifestJSON, update.ManifestMinisig); err != nil {
 		return err
 	}
-	return writeFile(filepath.Join(twDir, apkName), apkRaw, 0o644)
+	return cleanupDistributedAPKs(cfg.StateDir, "")
 }
 
 func updateManifestAPKSHA256(manifestJSON string) (string, error) {

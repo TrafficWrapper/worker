@@ -76,7 +76,9 @@ services:
       - /dev/net/tun:/dev/net/tun
     env_file: .env
     volumes:
-      - ./worker-state:/worker-state
+      # Only the AWG configs and peer registries: this internet-facing
+      # service does not need the worker's Noise identity or other keys.
+      - ./worker-state/awg:/worker-state/awg:ro
       - awg-run:/var/run/wireguard
     ports:
       - "${AWG_PORT:-51888}:51821/udp"
@@ -162,7 +164,8 @@ services:
     environment:
       XRAY_API_SOCKET: /run/xray-api/api.sock
     volumes:
-      - ./worker-state:/worker-state:ro
+      # Only the Xray config and restart request, not the rest of the state.
+      - ./worker-state/xray:/worker-state/xray:ro
       - xray-api:/run/xray-api
     ports:
       - "${XRAY_PORT:-2053}:8443/tcp"

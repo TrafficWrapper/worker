@@ -204,7 +204,8 @@ TCP/UDP ports manually, and running `docker compose up -d --build` is enough.
 
 `install.sh` is an optional helper for production-style hosts. It can:
 
-- auto-select free ports from `REALITY_PORT_POOL` and `AWG_PORT_POOL`;
+- pick free ports: 443 for REALITY when free, otherwise random ones (or from
+  `REALITY_PORT_POOL` / `AWG_PORT_POOL` when set);
 - detect the WAN interface and public egress;
 - write `.env` values;
 - when `APPLY_NFT=1`, install nft accept/NAT rules for the selected ports.
@@ -242,8 +243,8 @@ binaries:
 | `REALITY_PROBE_ADDR` | Address the agent uses to probe its own REALITY listener like a censor without a client key. | Optional | `xray:8443` | Keep the Compose default. |
 | `WORKER_ALLOW_PRIVATE_EGRESS` | Lets VPN clients reach private, loopback, link-local (cloud metadata) and Docker-internal addresses through the worker. | Optional | `0` | Keep `0`: both Xray routing and the `awg-gw` forward filter block those ranges. |
 | `WORKER_SMOKE_PEERS` | Built-in smoke credentials (`p0-smoke` REALITY user and AWG smoke peer). | Optional | enabled standalone, disabled with `ORCH_URL` | `1` to keep them on an orchestrated worker for `awg-smoke`, `0` to disable. |
-| `XRAY_PORT` | Public TCP port mapped to the REALITY container. | Optional | `2053` | `8444`, `2053`, or another free TCP port. |
-| `AWG_PORT` | Public UDP port mapped to AWG. | Optional | `51888` | Any free UDP port. |
+| `XRAY_PORT` | Public TCP port mapped to the REALITY container. | Optional | chosen by `install.sh` (Compose fallback `2053`) | `install.sh` takes 443 when free, otherwise a random port in 20000-59999, and keeps it on re-runs. |
+| `AWG_PORT` | Public UDP port mapped to AWG. | Optional | chosen by `install.sh` (Compose fallback `51888`) | A random free UDP port in 20000-59999, kept on re-runs. |
 | `AGENT_PORT` | Localhost TCP port exposing the worker agent health/API. | Optional | `9090` | `127.0.0.1:9090` by default. |
 | `AGENT_API_ALLOW_CIDRS` | Extra sources (comma-separated CIDRs or IPs) allowed to read `/self-describe` and `/metrics`. | Optional | empty | Set only for a scraper container on the Compose network; loopback and the host port work without it. |
 | `AWG_SUBNET` | Worker AWG subnet for device internal IPs. | Optional | `10.13.13.0/24` | Use a private subnet not colliding with your host. |
@@ -263,6 +264,7 @@ binaries:
 | `XRAY_NETWORK` | Xray REALITY stream network. | Optional | `tcp` | Set `xhttp` only when the operator configures matching XHTTP params on this worker. |
 | `XRAY_XHTTP_PATH` | XHTTP path used when `XRAY_NETWORK=xhttp`. | Optional | empty | Operator-chosen path; no public default. |
 | `XRAY_XHTTP_MODE` | XHTTP mode used when `XRAY_NETWORK=xhttp`. | Optional | empty | Passed through to Xray `xhttpSettings.mode`. |
+| `REALITY_MAX_TIME_DIFF` | Seconds a client's REALITY handshake time may differ from the worker clock (Xray `maxTimeDiff`). | Optional | `120` | Rejects replayed ClientHellos; `0` turns the check off (clients with badly wrong clocks). |
 | `XRAY_XHTTP_HOST` | XHTTP Host used when `XRAY_NETWORK=xhttp`. | Optional | `CAMOUFLAGE_DOMAIN` | Override only when the operator route config needs a different XHTTP host. A host other than `CAMOUFLAGE_DOMAIN` is logged and reported as `degraded: xhttp_host`: routes published by the orchestrator use the camouflage domain. |
 | `AWG_INBOUNDS` | AWG profiles as JSON (`name`, `interface`, `listen_port`, `public_port`, `subnet`, `own_dialect`, `min_version_code`, ...). | Optional | one base profile | `min_version_code` is the code derived from the app version name, major*10000+minor*100+patch (0.1.31 → 131), not the Android `versionCode`. See ARCHITECTURE for dialect rotation. |
 | `XRAY_XHTTP_EXTRA_JSON` | Extra XHTTP JSON object. | Optional | empty | Advanced passthrough as `xhttpSettings.extra`; keep empty unless you know the Xray field shape. |
@@ -272,8 +274,8 @@ binaries:
 | `APPLY_NFT` | Enables install-time nft accept rules for selected ports. | Optional | `0` | Set `1` only after reviewing rules. |
 | `EGRESS_VIA_WG` | Reserved deployment hint in `.env.example`; not consumed by current binaries. | Optional | empty | Leave empty unless you extend deployment scripts. |
 | `COMPOSE` | Compose command used by `install.sh`/`uninstall.sh`. | Optional | `docker compose` | `docker-compose` on older hosts. |
-| `REALITY_PORT_POOL` | TCP port pool used by `install.sh` auto-selection. | Optional | `8444 2053 2083` | Quoted space-separated list. |
-| `AWG_PORT_POOL` | UDP port pool used by `install.sh` auto-selection. | Optional | `51888 51889 51890 51891` | Quoted space-separated list. |
+| `REALITY_PORT_POOL` | TCP ports `install.sh` may choose from. | Optional | 443, then random | Quoted space-separated list, only to pin the choice. |
+| `AWG_PORT_POOL` | UDP ports `install.sh` may choose from. | Optional | random | Quoted space-separated list, only to pin the choice. |
 | `WAIT_TIMEOUT` | Seconds `install.sh` waits for all services to become healthy. | Optional | `180` | Raise on slow hosts where the first build takes longer. |
 | `SERVICE_NAME` | `awg-gw` stub/debug service name. | Optional | `awg-gw` | Only for stub/manual runs. |
 | `AWG_LISTEN_UDP` | `awg-gw` stub/debug UDP listen value. | Optional | `51821` | Only for stub/manual runs. |
@@ -365,6 +367,12 @@ WORKER_VERSION=v1.2.3 docker compose up -d --no-build --wait
 
 Without `WORKER_VERSION` the compose file falls back to the `local` tag and
 `docker compose up -d --build` builds from source as before.
+
+`install.sh` follows the same rule: with `WORKER_VERSION` set in `.env` it
+pulls the release, verifies every `worker-*` image signature by digest with
+cosign (see below) and starts it with `--no-build`; it stops if cosign is
+missing unless `ALLOW_UNVERIFIED_IMAGES=1`. Without `WORKER_VERSION` it builds
+from source.
 
 Rollback to the previous tag (take a backup first, see above):
 

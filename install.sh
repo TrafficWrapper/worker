@@ -4,8 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 COMPOSE=${COMPOSE:-docker compose}
-REALITY_PORT_POOL=${REALITY_PORT_POOL:-"8444 2053 2083"}
-AWG_PORT_POOL=${AWG_PORT_POOL:-"51888 51889 51890 51891"}
+# Without explicit pools, REALITY takes 443 when it is free (a TLS site on its
+# usual port) and otherwise, like AWG, a random high port, so deployments do
+# not share a recognizable default port.
+REALITY_PORT_POOL=${REALITY_PORT_POOL:-}
+AWG_PORT_POOL=${AWG_PORT_POOL:-}
 
 need() {
   command -v "$1" >/dev/null || {
@@ -22,19 +25,27 @@ port_free_udp() {
   ! ss -uln "sport = :$1" | awk 'NR>1{found=1} END{exit found?0:1}'
 }
 
+# random_ports prints candidate ports in 20000-59999.
+random_ports() {
+  python3 -c 'import secrets
+for _ in range(64): print(20000 + secrets.randbelow(40000))'
+}
+
 pick_tcp_port() {
-  for p in $REALITY_PORT_POOL; do
+  pool=${REALITY_PORT_POOL:-"443 $(random_ports | tr '\n' ' ')"}
+  for p in $pool; do
     if port_free_tcp "$p"; then echo "$p"; return; fi
   done
-  echo "no free REALITY TCP port in pool: $REALITY_PORT_POOL" >&2
+  echo "no free REALITY TCP port in pool: $pool" >&2
   exit 1
 }
 
 pick_udp_port() {
-  for p in $AWG_PORT_POOL; do
+  pool=${AWG_PORT_POOL:-$(random_ports | tr '\n' ' ')}
+  for p in $pool; do
     if port_free_udp "$p"; then echo "$p"; return; fi
   done
-  echo "no free AWG UDP port in pool: $AWG_PORT_POOL" >&2
+  echo "no free AWG UDP port in pool: $pool" >&2
   exit 1
 }
 
@@ -186,6 +197,45 @@ apply_nft_optional() {
   nft add rule inet trafficwrapper_worker input udp dport "$awg_port" counter accept
 }
 
+# verify_release_images checks the cosign signature of every pulled release
+# image by digest, so what runs is exactly what the release workflow signed.
+verify_release_images() {
+  version=$1
+  if ! command -v cosign >/dev/null; then
+    if [ "${ALLOW_UNVERIFIED_IMAGES:-0}" = "1" ]; then
+      echo "WARNING: cosign not found; running release $version without verifying image signatures" >&2
+      return
+    fi
+    echo "cosign is required to verify release images (https://docs.sigstore.dev/cosign/system_config/installation/);" >&2
+    echo "install it, or set ALLOW_UNVERIFIED_IMAGES=1 to skip the check" >&2
+    exit 1
+  fi
+  for image in $($COMPOSE config --images); do
+    case "$image" in
+      ghcr.io/trafficwrapper/worker-*:"$version") ;;
+      *) continue ;;
+    esac
+    ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")
+    cosign verify "$ref" \
+      --certificate-identity-regexp '^https://github.com/TrafficWrapper/worker/.github/workflows/release.yml@refs/tags/v' \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+    echo "verified $ref"
+  done
+}
+
+# start_services builds from source unless .env pins a release. A pinned
+# release is pulled and verified, never rebuilt locally under its tag.
+start_services() {
+  version=$(env_value WORKER_VERSION .env)
+  if [ -z "$version" ]; then
+    $COMPOSE up -d --build --wait --wait-timeout "${WAIT_TIMEOUT:-180}"
+    return
+  fi
+  $COMPOSE pull
+  verify_release_images "$version"
+  $COMPOSE up -d --no-build --wait --wait-timeout "${WAIT_TIMEOUT:-180}"
+}
+
 need_tun() {
   [ -c /dev/net/tun ] || {
     echo "missing /dev/net/tun; load the tun kernel module (modprobe tun) or enable TUN for this VPS" >&2
@@ -204,5 +254,5 @@ mkdir -p worker-state
 write_env
 verify_dest_hint
 apply_nft_optional
-$COMPOSE up -d --build --wait --wait-timeout "${WAIT_TIMEOUT:-180}"
+start_services
 $COMPOSE ps

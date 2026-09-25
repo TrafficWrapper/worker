@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func startProbeTarget(t *testing.T, h2 bool) string {
@@ -78,5 +79,20 @@ func TestXrayRoutingBlocksAbuseByDefaultFlags(t *testing.T) {
 	raw, _ := json.Marshal(xrayRouting(cfg))
 	if !strings.Contains(string(raw), `"bittorrent"`) || !strings.Contains(string(raw), `"25,465,587"`) {
 		t.Fatalf("abuse rules missing: %s", raw)
+	}
+}
+
+func TestFailedProbesAreRetriedWithBackoff(t *testing.T) {
+	if nextProbeDelay(0) != probeInterval {
+		t.Fatal("success does not wait the regular interval")
+	}
+	want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute}
+	for i, w := range want {
+		if got := nextProbeDelay(i + 1); got != w {
+			t.Fatalf("failure %d: retry after %v, want %v", i+1, got, w)
+		}
+	}
+	if nextProbeDelay(50) != probeInterval {
+		t.Fatal("backoff exceeds the regular interval")
 	}
 }

@@ -525,3 +525,25 @@ func TestRealityMaxTimeDiff(t *testing.T) {
 		t.Fatal("maxTimeDiff set although disabled")
 	}
 }
+
+func TestReadEnvRefusesNonGlobalDetectedAddressWhenOrchestrated(t *testing.T) {
+	t.Setenv("WORKER_STATE_DIR", t.TempDir())
+	t.Setenv("CAMOUFLAGE_DOMAIN", "www.example.net")
+	t.Setenv("ORCH_URL", "https://orch.example:9091")
+	t.Setenv("ORCH_STATIC_PUBLIC_KEY", "key")
+	t.Setenv("EGRESS_IP", "172.18.0.5")
+	if _, err := readEnv(); err == nil || !strings.Contains(err.Error(), "PUBLIC_ADDRESS") {
+		t.Fatalf("container address accepted as the public address: %v", err)
+	}
+	// An explicit PUBLIC_ADDRESS is the operator's choice.
+	t.Setenv("PUBLIC_ADDRESS", "worker.example.net")
+	if _, err := readEnv(); err != nil {
+		t.Fatal(err)
+	}
+	// Standalone workers only warn.
+	t.Setenv("PUBLIC_ADDRESS", "")
+	t.Setenv("ORCH_URL", "")
+	if _, err := readEnv(); err != nil {
+		t.Fatalf("standalone worker refused: %v", err)
+	}
+}

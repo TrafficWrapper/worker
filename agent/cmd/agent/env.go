@@ -170,9 +170,19 @@ func readEnv() (envConfig, error) {
 	}
 	if cfg.EgressIP == "" {
 		cfg.EgressIP = outboundIP()
+		slog.Warn("public egress IP not detected; falling back to the local interface address", "egress_ip", cfg.EgressIP)
 	}
 	if cfg.PublicAddress == "" {
 		cfg.PublicAddress = cfg.EgressIP
+		// Clients cannot reach a container or LAN address. An orchestrated
+		// worker would publish it to every client, so it refuses to start;
+		// a standalone one only warns.
+		if !isPublicIP(cfg.PublicAddress) {
+			if cfg.OrchURL != "" {
+				return envConfig{}, fmt.Errorf("no global public address found (got %q); set PUBLIC_ADDRESS or EGRESS_IP", cfg.PublicAddress)
+			}
+			slog.Warn("PUBLIC_ADDRESS is not set and no global address was found; clients outside this network cannot connect", "public_address", cfg.PublicAddress)
+		}
 	}
 	profiles, err := parseAWGInboundProfiles(os.Getenv("AWG_INBOUNDS"), cfg)
 	if err != nil {

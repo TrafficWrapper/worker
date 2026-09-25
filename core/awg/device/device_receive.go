@@ -562,10 +562,11 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 
 func (device *Device) DeterminePacketTypeAndPadding(packet []byte, expectedType uint32) (uint32, int) {
 	size := len(packet)
+	awg := device.awgParams()
 
 	if expectedType == MessageUnknownType || expectedType == MessageInitiationType {
-		padding := device.paddings.init
-		header := device.headers.init
+		padding := awg.paddings.init
+		header := awg.headers.init
 
 		if size == padding+MessageInitiationSize {
 			data := packet[padding:]
@@ -576,8 +577,8 @@ func (device *Device) DeterminePacketTypeAndPadding(packet []byte, expectedType 
 	}
 
 	if expectedType == MessageUnknownType || expectedType == MessageResponseType {
-		padding := device.paddings.response
-		header := device.headers.response
+		padding := awg.paddings.response
+		header := awg.headers.response
 
 		if size == padding+MessageResponseSize {
 			data := packet[padding:]
@@ -588,8 +589,8 @@ func (device *Device) DeterminePacketTypeAndPadding(packet []byte, expectedType 
 	}
 
 	if expectedType == MessageUnknownType || expectedType == MessageCookieReplyType {
-		padding := device.paddings.cookie
-		header := device.headers.cookie
+		padding := awg.paddings.cookie
+		header := awg.headers.cookie
 
 		if size == padding+MessageCookieReplySize {
 			data := packet[padding:]
@@ -600,8 +601,8 @@ func (device *Device) DeterminePacketTypeAndPadding(packet []byte, expectedType 
 	}
 
 	if expectedType == MessageUnknownType || expectedType == MessageTransportType {
-		padding := device.paddings.transport
-		header := device.headers.transport
+		padding := awg.paddings.transport
+		header := awg.headers.transport
 
 		if size >= padding+MessageTransportHeaderSize {
 			data := packet[padding:]

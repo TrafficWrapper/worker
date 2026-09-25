@@ -21,6 +21,9 @@ type usageState map[string]usageSnapshot
 type awgUsageState = usageState
 
 type usageSnapshot struct {
+	// Device is set on per-profile AWG entries so a device's total can include
+	// peers that are gone (a removed profile or a rotated key).
+	Device      string    `json:"device,omitempty"`
 	RxBytes     uint64    `json:"rx_bytes,omitempty"`
 	TxBytes     uint64    `json:"tx_bytes,omitempty"`
 	LastRxBytes uint64    `json:"last_rx_bytes,omitempty"`
@@ -41,6 +44,9 @@ func collectAWGUsageReports(cfg envConfig, devices []approvedDevice) ([]orchUsag
 		if err != nil {
 			return nil, err
 		}
+		for i := range peers {
+			peers[i].Profile = profile.Name
+		}
 		allPeers = append(allPeers, peers...)
 	}
 	if len(allPeers) == 0 {
@@ -49,9 +55,10 @@ func collectAWGUsageReports(cfg envConfig, devices []approvedDevice) ([]orchUsag
 	state := loadAWGUsageState(cfg.StateDir)
 	now := time.Now().UTC()
 	reports, next := buildAWGUsageReports(devices, allPeers, state, now)
-	next.prune(now)
+	next.pruneAWG(now)
+	// Unsaved totals would come back lower next time and be charged twice.
 	if err := saveAWGUsageState(cfg.StateDir, next); err != nil {
-		slog.Warn("awg usage state save failed", "err", err)
+		return nil, fmt.Errorf("save awg usage state: %w", err)
 	}
 	return reports, nil
 }
@@ -108,8 +115,6 @@ func buildAWGUsageReportForDevice(device approvedDevice, deviceID string, peerBy
 	}
 	matched := false
 	reportKey := ""
-	totalRx := uint64(0)
-	totalTx := uint64(0)
 	for _, creds := range candidates {
 		pubHex, err := serverpeer.KeyB64ToHex(creds.AWGPublicKey)
 		if err != nil {
@@ -125,20 +130,37 @@ func buildAWGUsageReportForDevice(device approvedDevice, deviceID string, peerBy
 			if reportKey == "" {
 				reportKey = creds.AWGPublicKey
 			}
-			stateKey := fmt.Sprintf("%s:%s:%d", deviceID, creds.AWGPublicKey, i)
-			snap := next[stateKey]
-			snap.RxBytes += counterDelta(snap.LastRxBytes, peer.RxBytes)
-			snap.TxBytes += counterDelta(snap.LastTxBytes, peer.TxBytes)
+			// One entry per device, key and profile. Entries of the older
+			// format were keyed by the peer's position across profiles and
+			// are taken over the first time the peer is seen.
+			stateKey := awgUsageStateKey(deviceID, creds.AWGPublicKey, peer.Profile)
+			snap, ok := next[stateKey]
+			if legacyKey := fmt.Sprintf("%s:%s:%d", deviceID, creds.AWGPublicKey, i); !ok {
+				if legacy, found := next[legacyKey]; found && legacy.Device == "" {
+					snap = legacy
+					delete(next, legacyKey)
+				}
+			}
+			snap.Device = deviceID
+			snap.RxBytes = addUint64Saturating(snap.RxBytes, counterDelta(snap.LastRxBytes, peer.RxBytes))
+			snap.TxBytes = addUint64Saturating(snap.TxBytes, counterDelta(snap.LastTxBytes, peer.TxBytes))
 			snap.LastRxBytes = peer.RxBytes
 			snap.LastTxBytes = peer.TxBytes
 			snap.UpdatedAt = now
 			next[stateKey] = snap
-			totalRx += snap.RxBytes
-			totalTx += snap.TxBytes
 		}
 	}
 	if !matched {
 		return orchUsageReport{}, false
+	}
+	// The total includes the device's peers that are no longer listed, so
+	// it never decreases when a profile or key goes away.
+	totalRx, totalTx := uint64(0), uint64(0)
+	for _, snap := range next {
+		if snap.Device == deviceID {
+			totalRx = addUint64Saturating(totalRx, snap.RxBytes)
+			totalTx = addUint64Saturating(totalTx, snap.TxBytes)
+		}
 	}
 	return orchUsageReport{
 		DeviceID:     device.DeviceID,
@@ -146,6 +168,31 @@ func buildAWGUsageReportForDevice(device approvedDevice, deviceID string, peerBy
 		RxBytes:      totalRx,
 		TxBytes:      totalTx,
 	}, true
+}
+
+func awgUsageStateKey(deviceID, publicKey, profile string) string {
+	return deviceID + ":" + publicKey + ":@" + profile
+}
+
+// pruneAWG drops a device's entries only when none of them was updated
+// within the retention, so dropping an old peer cannot lower a live total.
+// Entries of the older format are pruned one by one as before.
+func (state usageState) pruneAWG(now time.Time) {
+	lastSeen := map[string]time.Time{}
+	for _, snap := range state {
+		if snap.Device != "" && snap.UpdatedAt.After(lastSeen[snap.Device]) {
+			lastSeen[snap.Device] = snap.UpdatedAt
+		}
+	}
+	for key, snap := range state {
+		updated := snap.UpdatedAt
+		if snap.Device != "" {
+			updated = lastSeen[snap.Device]
+		}
+		if !updated.IsZero() && now.Sub(updated) > usageStateRetention {
+			delete(state, key)
+		}
+	}
 }
 
 func counterDelta(previous, current uint64) uint64 {

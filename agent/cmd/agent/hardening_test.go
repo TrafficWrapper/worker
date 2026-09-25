@@ -116,14 +116,15 @@ func TestApplyXrayConfigUpdatesUsersWithoutRestart(t *testing.T) {
 	if err := writeXrayConfigBytes(cfg, first); err != nil {
 		t.Fatal(err)
 	}
-	second, _ := xrayConfigBytes(cfg, st, []approvedDevice{b})
-	if err := applyXrayConfig(cfg, second, 1); err != nil {
+	// Additions are applied live; removals restart Xray (WRK-M3).
+	second, _ := xrayConfigBytes(cfg, st, []approvedDevice{a, b})
+	if err := applyXrayConfig(cfg, second, 2); err != nil {
 		t.Fatal(err)
 	}
 	if restartRequested(cfg) {
 		t.Fatal("client-only change requested an xray restart")
 	}
-	if len(fx.calls) != 2 || fx.calls[0][0] != "rmu" || !containsString(fx.calls[0], "device-a") || fx.calls[1][0] != "adu" {
+	if len(fx.calls) != 1 || fx.calls[0][0] != "adu" {
 		t.Fatalf("unexpected xray api calls: %v", fx.calls)
 	}
 	if xrayRestartPending(cfg) {
@@ -139,6 +140,29 @@ func TestApplyXrayConfigUpdatesUsersWithoutRestart(t *testing.T) {
 	addDoc, _ := json.Marshal(xrayUserAddDocument("reality-in", []map[string]any{{"id": b.RealityUUID, "email": b.DeviceID}}))
 	if !strings.Contains(string(addDoc), `"port":8443`) || !strings.Contains(string(addDoc), `"tag":"reality-in"`) {
 		t.Fatalf("adu document is not buildable by xray: %s", addDoc)
+	}
+}
+
+func TestApplyXrayConfigRestartsWhenUsersAreRemoved(t *testing.T) {
+	fx := &fakeXrayAPI{}
+	installFakeXrayAPI(t, fx)
+	cfg := envConfig{StateDir: t.TempDir(), RealityDest: "example.com:443", CamouflageDomain: "example.com"}
+	st := hardeningTestState()
+	a := realityDevice("device-a", "4fad2182-6de3-4407-bf8f-d8c688160ce6")
+	b := realityDevice("device-b", "4fad2182-6de3-4407-bf8f-d8c688160ce7")
+	first, _ := xrayConfigBytes(cfg, st, []approvedDevice{a, b})
+	if err := writeXrayConfigBytes(cfg, first); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := xrayConfigBytes(cfg, st, []approvedDevice{b, realityDevice("device-c", "4fad2182-6de3-4407-bf8f-d8c688160ce9")})
+	if err := applyXrayConfig(cfg, second, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !restartRequested(cfg) {
+		t.Fatal("removed user was dropped live; its open sessions would survive")
+	}
+	if len(fx.calls) != 0 {
+		t.Fatalf("xray api used although a restart applies the change: %v", fx.calls)
 	}
 }
 

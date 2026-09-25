@@ -58,6 +58,8 @@ type awgDesiredPeer struct {
 }
 
 type awgPeerConfig struct {
+	// Profile names the AWG profile the peer was listed on (usage only).
+	Profile             string `json:"-"`
 	PublicKeyHex        string
 	PresharedKeyHex     string `json:"-"`
 	AllowedIPs          []string

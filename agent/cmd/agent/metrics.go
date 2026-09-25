@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -251,6 +252,20 @@ func addAWGMetrics(m *metricsWriter, iface string, startedAt time.Time, peers []
 		// must not treat this metric as proof that the peer is offline.
 		m.add("awg_peer_last_handshake_time_seconds", "gauge", "Unix time of the last AWG handshake with the peer.", labels, peer.LastHandshakeSec)
 	}
+}
+
+// metricsScrubPeerLabels is on unless the operator asks for raw labels with
+// TW_METRICS_RAW_PEER_LABELS=1. The older TW_METRICS_SCRUB_PEER_LABELS=0 was
+// the shipped .env default rather than a choice, so it no longer turns
+// scrubbing off.
+func metricsScrubPeerLabels() bool {
+	if os.Getenv("TW_METRICS_RAW_PEER_LABELS") == "1" {
+		return false
+	}
+	if os.Getenv("TW_METRICS_SCRUB_PEER_LABELS") == "0" {
+		slog.Warn("TW_METRICS_SCRUB_PEER_LABELS=0 is ignored; set TW_METRICS_RAW_PEER_LABELS=1 to export raw AWG peer labels")
+	}
+	return true
 }
 
 func scrubbedPeerLabel(salt, peerHex string) string {

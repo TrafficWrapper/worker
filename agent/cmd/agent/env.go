@@ -98,7 +98,7 @@ func readEnv() (envConfig, error) {
 		AWGGateway:             getenv("AWG_GATEWAY", gateway),
 		AWGUAPISocket:          getenv("AWG_UAPI_SOCKET", "/var/run/wireguard/awg1.sock"),
 		AWGServerKeepalive:     serverKeepalive,
-		MetricsScrubPeerLabels: getenv("TW_METRICS_SCRUB_PEER_LABELS", "0") == "1",
+		MetricsScrubPeerLabels: metricsScrubPeerLabels(),
 		AgentAPIAllowCIDRs:     os.Getenv("AGENT_API_ALLOW_CIDRS"),
 		XrayAPISocket:          getenv("XRAY_API_SOCKET", defaultXrayAPISocket),
 		XrayBinary:             getenv("XRAY_BINARY", "/usr/local/bin/xray"),
@@ -151,7 +151,9 @@ func readEnv() (envConfig, error) {
 	if cfg.MetricsScrubPeerLabels {
 		salt, err := loadMetricsScrubSalt(cfg.StateDir, os.Getenv("TW_METRICS_SCRUB_SALT"))
 		if err != nil {
-			return envConfig{}, fmt.Errorf("load metrics scrub salt: %w", err)
+			// Labels stay scrubbed; they only change on every restart.
+			slog.Warn("metrics scrub salt not persisted; using a per-process salt", "err", err)
+			salt = randHex(32)
 		}
 		cfg.MetricsScrubSalt = salt
 	}

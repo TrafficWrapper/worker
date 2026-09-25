@@ -208,3 +208,23 @@ func startMetricsUAPIServer(t *testing.T, response []string) string {
 	})
 	return socketPath
 }
+
+func TestMetricsScrubPeerLabelsByDefault(t *testing.T) {
+	for _, tc := range []struct {
+		scrub, raw string
+		want       bool
+	}{
+		{"", "", true},
+		{"0", "", true}, // the old shipped .env value is not an opt-out
+		{"1", "", true},
+		{"", "1", false},
+		{"0", "1", false},
+		{"", "0", true},
+	} {
+		t.Setenv("TW_METRICS_SCRUB_PEER_LABELS", tc.scrub)
+		t.Setenv("TW_METRICS_RAW_PEER_LABELS", tc.raw)
+		if got := metricsScrubPeerLabels(); got != tc.want {
+			t.Fatalf("scrub=%q raw=%q: got %v, want %v", tc.scrub, tc.raw, got, tc.want)
+		}
+	}
+}

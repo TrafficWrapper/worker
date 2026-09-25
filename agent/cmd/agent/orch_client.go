@@ -94,6 +94,9 @@ type orchAckRequest struct {
 	EgressIPObserved string            `json:"egress_ip_observed"`
 	SelfDescribe     map[string]any    `json:"self_describe,omitempty"`
 	Usage            []orchUsageReport `json:"usage,omitempty"`
+	// ClientAppliedSeq is the seq of the client bundle this worker serves; the
+	// orchestrator uses it to keep its client config counter ahead of it.
+	ClientAppliedSeq int64 `json:"client_applied_seq,omitempty"`
 }
 
 type orchNudgeRequest struct {
@@ -256,7 +259,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 					orchDesiredSeqGauge.Store(seq)
 				}
 				slog.Info("orch applied", "seq", seq, "duration", time.Since(started).Round(time.Millisecond))
-				reportOrchAck(ctx, client, cfg, st, state.WorkerID, seq)
+				reportOrchAck(ctx, client, cfg, st, state.WorkerID, seq, state.ClientAppliedSeq)
 				lastAck = time.Now()
 				retry.reset()
 				continue
@@ -284,7 +287,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			slog.Debug("orch nudge heartbeat", "desired", nudge.DesiredSeq, "applied", state.AppliedSeq)
 		}
 		if time.Since(lastAck) >= cfg.OrchAckInterval {
-			reportOrchAck(ctx, client, cfg, st, state.WorkerID, state.AppliedSeq)
+			reportOrchAck(ctx, client, cfg, st, state.WorkerID, state.AppliedSeq, state.ClientAppliedSeq)
 			reconcileStarted := time.Now()
 			if err := reconcileAWGPeers(cfg, st); err != nil {
 				slog.Warn("awg periodic reconcile incomplete", "err", err)
@@ -300,11 +303,19 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 	}
 }
 
-func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st stateFile, workerID string, seq int64) {
+func reportOrchAck(ctx context.Context, client *orchClient, cfg envConfig, st stateFile, workerID string, seq, clientSeq int64) {
 	devices := cachedApprovedDevices(cfg.StateDir)
 	approvedDevicesGauge.Store(int64(len(filterUnexpiredApprovedDevices(devices, time.Now().UTC()))))
 	usage := collectWorkerUsageReports(cfg, devices)
-	ack, err := client.ack(ctx, workerID, seq, cfg.EgressIP, selfDescribe(cfg, st), usage)
+	ack, err := client.ack(ctx, orchAckRequest{
+		WorkerID:         workerID,
+		AppliedVersion:   seq,
+		SelfCheck:        selfCheckStatus(),
+		EgressIPObserved: cfg.EgressIP,
+		SelfDescribe:     selfDescribe(cfg, st),
+		Usage:            usage,
+		ClientAppliedSeq: clientSeq,
+	})
 	recordOrchRequest("ack", err)
 	if err != nil {
 		slog.Warn("orch ack failed", "err", err)
@@ -371,9 +382,9 @@ func (c *orchClient) pull(ctx context.Context, workerID string, have int64) (orc
 	return resp, err
 }
 
-func (c *orchClient) ack(ctx context.Context, workerID string, seq int64, egressIP string, self map[string]any, usage []orchUsageReport) (orchAckResponse, error) {
+func (c *orchClient) ack(ctx context.Context, req orchAckRequest) (orchAckResponse, error) {
 	var resp orchAckResponse
-	err := c.noiseCall(ctx, "/w/v1/ack", orchAckRequest{WorkerID: workerID, AppliedVersion: seq, SelfCheck: selfCheckStatus(), EgressIPObserved: egressIP, SelfDescribe: self, Usage: usage}, &resp)
+	err := c.noiseCall(ctx, "/w/v1/ack", req, &resp)
 	return resp, err
 }
 

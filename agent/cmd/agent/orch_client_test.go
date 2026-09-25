@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -92,4 +93,26 @@ func mustMarshalText(t *testing.T, v interface{ MarshalText() ([]byte, error) })
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+func TestAckReportsClientAppliedSeq(t *testing.T) {
+	f := newFakeOrchestrator(t, func(string, json.RawMessage) any {
+		return map[string]any{"ok": true}
+	})
+	cfg := envConfig{StateDir: t.TempDir(), AWGUAPISocket: filepath.Join(t.TempDir(), "missing.sock")}
+	reportOrchAck(t.Context(), f.client(cfg), cfg, hardeningTestState(), "w1", 12, 3456)
+	acks := f.requestsTo("/w/v1/ack")
+	if len(acks) != 1 {
+		t.Fatalf("acks: %d", len(acks))
+	}
+	var ack struct {
+		AppliedVersion   int64 `json:"applied_version"`
+		ClientAppliedSeq int64 `json:"client_applied_seq"`
+	}
+	if err := json.Unmarshal(acks[0], &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.AppliedVersion != 12 || ack.ClientAppliedSeq != 3456 {
+		t.Fatalf("ack: %s", acks[0])
+	}
 }

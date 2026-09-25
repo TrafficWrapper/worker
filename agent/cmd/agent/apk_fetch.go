@@ -82,6 +82,10 @@ func (d *apkDownloader) handle(ctx context.Context, cfg envConfig, client apkChu
 		slog.Warn("apk update_ref ignored", "err", err)
 		return
 	}
+	if err := checkUpdateManifestSignature(cfg.StateDir, ref.ManifestJSON, ref.ManifestMinisig); err != nil {
+		slog.Warn("apk update_ref ignored", "err", err)
+		return
+	}
 	if apkAlreadyPublished(cfg.StateDir, ref) {
 		if err := publishUpdateManifest(cfg.StateDir, ref.ManifestJSON, ref.ManifestMinisig); err != nil {
 			slog.Warn("apk manifest publish failed", "err", err)
@@ -265,6 +269,9 @@ func downloadAPK(ctx context.Context, cfg envConfig, client apkChunkFetcher, wor
 func publishUpdateManifest(stateDir, manifestJSON, minisig string) error {
 	if manifestExpired(manifestJSON, platformNow()) {
 		return errors.New("update manifest has expired")
+	}
+	if err := checkUpdateManifestSignature(stateDir, manifestJSON, minisig); err != nil {
+		return err
 	}
 	twDir := filepath.Join(stateDir, "distributor", "tw")
 	if err := writeFile(filepath.Join(twDir, "update-manifest.json"), []byte(strings.TrimSpace(manifestJSON)), 0o644); err != nil {

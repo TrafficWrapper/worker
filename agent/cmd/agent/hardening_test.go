@@ -512,3 +512,16 @@ func TestWaitTimeout(t *testing.T) {
 	}
 	wg.Done()
 }
+
+func TestRealityMaxTimeDiff(t *testing.T) {
+	cfg := envConfig{RealityDest: "www.example.net:443", CamouflageDomain: "www.example.net", RealityMaxTimeDiff: 2 * time.Minute}
+	raw, _ := json.Marshal(xrayConfigDocument(cfg, hardeningTestState(), nil))
+	if !strings.Contains(string(raw), `"maxTimeDiff":120000`) {
+		t.Fatalf("maxTimeDiff missing: %s", raw)
+	}
+	cfg.RealityMaxTimeDiff = 0
+	raw, _ = json.Marshal(xrayConfigDocument(cfg, hardeningTestState(), nil))
+	if strings.Contains(string(raw), "maxTimeDiff") {
+		t.Fatal("maxTimeDiff set although disabled")
+	}
+}

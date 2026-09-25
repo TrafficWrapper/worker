@@ -4,8 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 COMPOSE=${COMPOSE:-docker compose}
-REALITY_PORT_POOL=${REALITY_PORT_POOL:-"8444 2053 2083"}
-AWG_PORT_POOL=${AWG_PORT_POOL:-"51888 51889 51890 51891"}
+# Without explicit pools, REALITY takes 443 when it is free (a TLS site on its
+# usual port) and otherwise, like AWG, a random high port, so deployments do
+# not share a recognizable default port.
+REALITY_PORT_POOL=${REALITY_PORT_POOL:-}
+AWG_PORT_POOL=${AWG_PORT_POOL:-}
 
 need() {
   command -v "$1" >/dev/null || {
@@ -22,19 +25,27 @@ port_free_udp() {
   ! ss -uln "sport = :$1" | awk 'NR>1{found=1} END{exit found?0:1}'
 }
 
+# random_ports prints candidate ports in 20000-59999.
+random_ports() {
+  python3 -c 'import secrets
+for _ in range(64): print(20000 + secrets.randbelow(40000))'
+}
+
 pick_tcp_port() {
-  for p in $REALITY_PORT_POOL; do
+  pool=${REALITY_PORT_POOL:-"443 $(random_ports | tr '\n' ' ')"}
+  for p in $pool; do
     if port_free_tcp "$p"; then echo "$p"; return; fi
   done
-  echo "no free REALITY TCP port in pool: $REALITY_PORT_POOL" >&2
+  echo "no free REALITY TCP port in pool: $pool" >&2
   exit 1
 }
 
 pick_udp_port() {
-  for p in $AWG_PORT_POOL; do
+  pool=${AWG_PORT_POOL:-$(random_ports | tr '\n' ' ')}
+  for p in $pool; do
     if port_free_udp "$p"; then echo "$p"; return; fi
   done
-  echo "no free AWG UDP port in pool: $AWG_PORT_POOL" >&2
+  echo "no free AWG UDP port in pool: $pool" >&2
   exit 1
 }
 

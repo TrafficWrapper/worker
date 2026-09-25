@@ -55,6 +55,22 @@ detect_ip() {
   hostname -I | awk '{print $1}'
 }
 
+# detect_ipv6 asks from the host: containers on the default Compose network
+# have no IPv6, so the agent cannot find the address itself.
+detect_ipv6() {
+  v6=$(curl -6fsS --max-time 4 https://api6.ipify.org 2>/dev/null || true)
+  if python3 - "$v6" <<'PY'
+import ipaddress, sys
+try:
+    sys.exit(0 if ipaddress.IPv6Address(sys.argv[1].strip()).is_global else 1)
+except ValueError:
+    sys.exit(1)
+PY
+  then
+    echo "$v6"
+  fi
+}
+
 first_host() {
   python3 - "$1" <<'PY'
 import ipaddress, sys
@@ -89,9 +105,18 @@ write_env() {
   egress=${EGRESS_IP:-$(env_value EGRESS_IP "$previous")}
   egress=${egress:-$(detect_ip)}
   camouflage=${CAMOUFLAGE_DOMAIN:-$(env_value CAMOUFLAGE_DOMAIN "$previous")}
-  python3 - "$previous" "$xr" "$awg" "$subnet" "$gateway" "$egress" "$camouflage" <<'PY'
+  v6=${PUBLIC_ADDRESS_V6:-$(env_value PUBLIC_ADDRESS_V6 "$previous")}
+  if [ "$v6" = "auto" ]; then
+    v6=$(detect_ipv6)
+    if [ -n "$v6" ]; then
+      echo "PUBLIC_ADDRESS_V6=auto resolved on the host to $v6"
+    else
+      echo "WARNING: PUBLIC_ADDRESS_V6=auto: the host has no global IPv6; no IPv6 endpoint will be advertised" >&2
+    fi
+  fi
+  python3 - "$previous" "$xr" "$awg" "$subnet" "$gateway" "$egress" "$camouflage" "$v6" <<'PY'
 import sys
-previous, xr, awg, subnet, gateway, egress, camouflage = sys.argv[1:]
+previous, xr, awg, subnet, gateway, egress, camouflage, v6 = sys.argv[1:]
 kept = {}
 if previous:
     for line in open(previous):
@@ -107,6 +132,7 @@ repl.update({
     "AWG_GATEWAY": gateway,
     "EGRESS_IP": egress,
     "CAMOUFLAGE_DOMAIN": camouflage,
+    "PUBLIC_ADDRESS_V6": v6,
 })
 lines = []
 seen = set()

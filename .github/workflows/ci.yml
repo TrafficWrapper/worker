@@ -82,7 +82,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: shellcheck
-        run: shellcheck install.sh uninstall.sh distributor/entrypoint.sh xray/entrypoint.sh
+        run: shellcheck install.sh uninstall.sh distributor/entrypoint.sh xray/entrypoint.sh tests/install_env_test.sh
+
+      - name: install.sh tests
+        run: bash tests/install_env_test.sh
 
   docker:
     runs-on: ubuntu-latest

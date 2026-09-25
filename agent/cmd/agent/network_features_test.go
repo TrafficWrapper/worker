@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -64,5 +68,26 @@ func TestAWGRegistryCarriesRateLimits(t *testing.T) {
 	device.Limits.UploadMbps = -1
 	if _, err := normalizeApprovedDevice(device); err == nil || !strings.Contains(err.Error(), "limits") {
 		t.Fatalf("negative limit accepted: %v", err)
+	}
+}
+
+func TestPublicAddressV6AutoWarnsWhenNothingFound(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no ipv6", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	oldURL := ipv6EchoURL
+	ipv6EchoURL = srv.URL
+	t.Cleanup(func() { ipv6EchoURL = oldURL })
+	addr, err := publicAddressV6("auto")
+	if err != nil || addr != "" {
+		t.Fatalf("addr=%q err=%v", addr, err)
+	}
+	if !strings.Contains(logs.String(), "PUBLIC_ADDRESS_V6=auto") {
+		t.Fatalf("no warning logged: %s", logs.String())
 	}
 }

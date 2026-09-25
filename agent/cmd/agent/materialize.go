@@ -3,15 +3,12 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -47,12 +44,6 @@ type approvedDeviceAWGProfile struct {
 	AWGPublicKey string `json:"awg_public_key"`
 	InternalIP   string `json:"internal_ip"`
 	PSK2         string `json:"psk2"`
-}
-
-type workerConfigDocument struct {
-	DesiredState struct {
-		ApprovedDevices []approvedDevice `json:"approved_devices"`
-	} `json:"desired_state"`
 }
 
 type (
@@ -113,13 +104,14 @@ func collectAWGProfilePeerSnapshots(cfg envConfig) []awgProfilePeerSnapshot {
 	return out
 }
 
-func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON string) error {
-	devices, err := approvedDevicesFromWorkerConfig(workerConfigJSON)
-	if err != nil {
-		return err
-	}
-	devices = filterUnexpiredApprovedDevices(devices, time.Now().UTC())
-	xrayRaw, err := xrayConfigBytes(cfg, st, devices)
+// applyDesiredState renders and applies Xray users and AWG peers. A protocol
+// the orchestrator switched off, or a revoked worker, gets no device
+// credentials; Xray still starts with the remaining inbound users.
+func applyDesiredState(cfg envConfig, st stateFile, ds desiredState) error {
+	now := time.Now().UTC()
+	realityDevices := ds.realityDevices(now)
+	awgDevices := ds.awgDevices(now)
+	xrayRaw, err := xrayConfigBytes(cfg, st, realityDevices)
 	if err != nil {
 		return fmt.Errorf("render xray config: %w", err)
 	}
@@ -127,7 +119,7 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 	// AWG peers, and one failing AWG profile must not hold back the others.
 	var errs []error
 	for _, profile := range awgProfiles(cfg) {
-		desiredPeers, err := writeAWGPeerRegistryForProfile(cfg, st, devices, profile)
+		desiredPeers, err := writeAWGPeerRegistryForProfile(cfg, st, awgDevices, profile)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("write awg peer registry %s: %w", profile.Name, err))
 			continue
@@ -140,32 +132,18 @@ func materializeApprovedDevices(cfg envConfig, st stateFile, workerConfigJSON st
 			slog.Info("awg materialized", "profile", profile.Name, "peers", len(desiredPeers), "uapi_socket", profile.UAPISocket)
 		}
 	}
-	if err := applyXrayConfig(cfg, xrayRaw, len(devices)); err != nil {
+	if err := applyXrayConfig(cfg, xrayRaw, len(realityDevices)); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }
 
 func approvedDevicesFromWorkerConfig(raw string) ([]approvedDevice, error) {
-	var doc workerConfigDocument
-	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+	ds, err := parseDesiredState(raw)
+	if err != nil {
 		return nil, err
 	}
-	out := make([]approvedDevice, 0, len(doc.DesiredState.ApprovedDevices))
-	for _, device := range doc.DesiredState.ApprovedDevices {
-		if device.Status != "approved" {
-			continue
-		}
-		normalized, err := normalizeApprovedDevice(device)
-		if err != nil {
-			// One malformed device must not block every other device on the
-			// worker, so it is skipped instead of failing the whole bundle.
-			slog.Warn("approved device skipped", "device_id", sanitizeLogValue(device.DeviceID), "err", err)
-			continue
-		}
-		out = append(out, normalized)
-	}
-	return out, nil
+	return ds.devices, nil
 }
 
 func normalizeApprovedDevice(device approvedDevice) (approvedDevice, error) {
@@ -259,31 +237,6 @@ func sanitizeLogValue(value string) string {
 		}
 		return r
 	}, value)
-}
-
-func cachedApprovedDevices(stateDir string) []approvedDevice {
-	devices, err := loadCachedApprovedDevices(stateDir)
-	if err != nil {
-		slog.Warn("cached approved_devices ignored", "err", err)
-		return nil
-	}
-	return devices
-}
-
-func loadCachedApprovedDevices(stateDir string) ([]approvedDevice, error) {
-	path := filepath.Join(stateDir, "orch", "worker-config.json")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read cached worker config: %w", err)
-	}
-	if len(strings.TrimSpace(string(raw))) == 0 {
-		return nil, errors.New("cached worker config is empty")
-	}
-	devices, err := approvedDevicesFromWorkerConfig(string(raw))
-	if err != nil {
-		return nil, fmt.Errorf("parse cached worker config: %w", err)
-	}
-	return devices, nil
 }
 
 func filterUnexpiredApprovedDevices(devices []approvedDevice, now time.Time) []approvedDevice {
@@ -522,12 +475,12 @@ func awgPeerMatches(live awgPeerConfig, want awgDesiredPeer, keepaliveSec int) b
 }
 
 func reconcileAWGPeers(cfg envConfig, st stateFile) error {
-	devices, err := loadCachedApprovedDevices(cfg.StateDir)
+	ds, err := loadCachedDesiredState(cfg.StateDir)
 	if err != nil {
 		return fmt.Errorf("AWG reconcile skipped by anti-wipe guard: %w", err)
 	}
-	devices = filterUnexpiredApprovedDevices(devices, time.Now().UTC())
-	if orchAppliedSeq(cfg.StateDir) > 0 && len(devices) == 0 {
+	devices := ds.awgDevices(time.Now().UTC())
+	if orchAppliedSeq(cfg.StateDir) > 0 && len(devices) == 0 && !ds.awgIntentionallyEmpty() {
 		return errors.New("AWG reconcile skipped by anti-wipe guard: applied worker config has no approved devices")
 	}
 
@@ -540,7 +493,7 @@ func reconcileAWGPeers(cfg envConfig, st stateFile) error {
 	for _, profile := range profiles {
 		profile := profile
 		go func() {
-			results <- profileResult{name: profile.Name, err: reconcileAWGProfile(cfg, st, devices, profile)}
+			results <- profileResult{name: profile.Name, err: reconcileAWGProfile(cfg, st, devices, profile, ds.awgIntentionallyEmpty())}
 		}()
 	}
 	var errs []error
@@ -555,12 +508,12 @@ func reconcileAWGPeers(cfg envConfig, st stateFile) error {
 	return errors.Join(errs...)
 }
 
-func reconcileAWGProfile(cfg envConfig, st stateFile, devices []approvedDevice, profile awgInboundProfile) error {
+func reconcileAWGProfile(cfg envConfig, st stateFile, devices []approvedDevice, profile awgInboundProfile, allowEmpty bool) error {
 	if strings.TrimSpace(profile.UAPISocket) == "" {
 		return errors.New("UAPI socket is not configured")
 	}
 	_, desired := buildAWGPeerRegistryForProfile(st, devices, profile, !cfg.DisableSmokePeers)
-	if len(desired) == 0 {
+	if len(desired) == 0 && !allowEmpty {
 		return errors.New("desired peer set is empty; refusing destructive sync")
 	}
 	current, err := listAWGPeerConfigs(profile.UAPISocket)

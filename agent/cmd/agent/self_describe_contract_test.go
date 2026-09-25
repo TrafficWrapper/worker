@@ -181,7 +181,7 @@ func TestValidateSelfDescribeEnvRejectsBadSettings(t *testing.T) {
 
 func TestPullRequestCarriesWorkerCapabilities(t *testing.T) {
 	raw, _ := json.Marshal(orchPullRequest{WorkerID: "w", HaveSeq: 1, WorkerCapabilities: workerCapabilities})
-	if !strings.Contains(string(raw), `"worker_capabilities":["reality_flow"]`) {
+	if !strings.Contains(string(raw), `"worker_capabilities":["reality_flow",`) {
 		t.Fatalf("pull request: %s", raw)
 	}
 }

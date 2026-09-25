@@ -40,7 +40,7 @@ func renderAll(cfg envConfig, st stateFile) error {
 }
 
 func renderXray(cfg envConfig, st stateFile) error {
-	devices := filterUnexpiredApprovedDevices(cachedApprovedDevices(cfg.StateDir), time.Now().UTC())
+	devices := cachedDesiredState(cfg.StateDir).realityDevices(time.Now().UTC())
 	xrayRaw, err := xrayConfigBytes(cfg, st, devices)
 	if err != nil {
 		return err
@@ -55,17 +55,17 @@ func renderXray(cfg envConfig, st stateFile) error {
 }
 
 func renderAWG(cfg envConfig, st stateFile) error {
-	devices, cachedErr := loadCachedApprovedDevices(cfg.StateDir)
+	ds, cachedErr := loadCachedDesiredState(cfg.StateDir)
+	var devices []approvedDevice
 	skipRegistryWrite := false
 	if cachedErr != nil {
 		if orchAppliedSeq(cfg.StateDir) > 0 {
 			slog.Warn("awg registry render skipped by anti-wipe guard", "err", cachedErr)
 			skipRegistryWrite = true
 		}
-		devices = nil
 	} else {
-		devices = filterUnexpiredApprovedDevices(devices, time.Now().UTC())
-		if orchAppliedSeq(cfg.StateDir) > 0 && len(devices) == 0 {
+		devices = ds.awgDevices(time.Now().UTC())
+		if orchAppliedSeq(cfg.StateDir) > 0 && len(devices) == 0 && !ds.awgIntentionallyEmpty() {
 			slog.Warn("awg registry render skipped by anti-wipe guard: applied worker config has no approved devices")
 			skipRegistryWrite = true
 		}
@@ -99,6 +99,9 @@ func renderDistributor(cfg envConfig, st stateFile) error {
 		return err
 	}
 	if orchAppliedSeq(cfg.StateDir) > 0 && fileExists(filepath.Join(cfg.StateDir, "distributor", "tw", "config.json")) {
+		return nil
+	}
+	if loadOrchState(cfg.StateDir).Status == orchStatusRevoked {
 		return nil
 	}
 	pubCfg := map[string]any{

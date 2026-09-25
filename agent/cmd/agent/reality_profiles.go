@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -130,11 +131,19 @@ func ensureRealityCohorts(st *stateFile) bool {
 }
 
 // realityShortIDs lists the short IDs the REALITY inbounds accept: the base
-// one plus every cohort that the orchestrator has not revoked.
+// one plus every cohort that the orchestrator has not revoked. The base short
+// ID cannot be revoked: every client without a cohort uses it, and without
+// it the list could end up empty.
 func realityShortIDs(st stateFile, revoked []string) []string {
+	base := strings.ToLower(strings.TrimSpace(st.Reality.ShortID))
 	skip := make(map[string]struct{}, len(revoked))
 	for _, id := range revoked {
-		skip[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id == base {
+			slog.Warn("revocation of the base REALITY short ID ignored")
+			continue
+		}
+		skip[id] = struct{}{}
 	}
 	ids := []string{}
 	seen := map[string]struct{}{}

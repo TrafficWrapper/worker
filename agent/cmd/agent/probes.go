@@ -74,6 +74,9 @@ func selfCheckStatus() string {
 	if xrayConfigRejected.Load() {
 		failed = append(failed, "xray_config")
 	}
+	if xhttpHostMismatch.Load() {
+		failed = append(failed, "xhttp_host")
+	}
 	if applyIncomplete() {
 		failed = append(failed, "apply")
 	}

@@ -47,6 +47,11 @@ then remove the old profile. `WORKER_DIALECT_WIDE=1` draws junk-packet
 parameters (Jc, Jmin, Jmax) from the wider ranges; enable it only after every
 client accepts them.
 
+A profile's `min_version_code` keeps it from clients that are too old. It is
+the code derived from the app version name, major*10000 + minor*100 + patch
+(0.1.31 → 131), not the Android `versionCode`; the orchestrator compares it
+with the same derived code of each client.
+
 ## Per-device AWG rate limits
 
 `desired_state.approved_devices[].limits.download_mbps` / `upload_mbps` are

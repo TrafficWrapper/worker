@@ -404,6 +404,11 @@ inspected with `docker buildx imagetools inspect <image> --format '{{ json .Prov
   unless `WORKER_ALLOW_PRIVATE_EGRESS=1`. Xray drops private answers from DNS
   and dials the address it resolved itself (IPv4 only), so a name cannot switch
   to a private address between the routing check and the connection.
+- When the orchestrator switches a protocol off (`desired_state.reality.enabled`
+  or `awg.enabled` = false) the worker serves no device credentials for it.
+  When it revokes the worker, the agent removes all device users and peers,
+  restarts Xray to end open sessions, deletes the published client config and
+  APKs, and asks again only hourly.
 - Keep `APPLY_NFT=0` while testing. Review firewall/NAT rules before enabling it
   on a production server.
 - Worker enrollment tokens are one-time secrets; create them in the orchestrator

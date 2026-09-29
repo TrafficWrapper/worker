@@ -257,6 +257,36 @@ func TestRevokedWorkerStopsServing(t *testing.T) {
 	}
 }
 
+func TestRevokedStatusInOKPullAnswerBacksOff(t *testing.T) {
+	// An older orchestrator reports revocation as a status only, with ok set.
+	f := newFakeOrchestrator(t, func(path string, _ json.RawMessage) any {
+		if strings.HasSuffix(path, "/config/pull") {
+			return map[string]any{"ok": true, "status": "revoked"}
+		}
+		return map[string]any{"ok": false, "status": "revoked", "error": "worker revoked"}
+	})
+	stateDir := t.TempDir()
+	if err := saveOrchState(stateDir, orchState{WorkerID: "w1", AppliedSeq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := envConfig{StateDir: stateDir, DisableSmokePeers: true, RealityDest: "www.example.net:443", CamouflageDomain: "www.example.net"}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runOrchestratorLoop(ctx, cfg, hardeningTestState(), f.client(cfg))
+	}()
+	time.Sleep(2 * time.Second)
+	cancel()
+	<-done
+	if loadOrchState(stateDir).Status != orchStatusRevoked {
+		t.Fatal("worker did not enter the revoked state")
+	}
+	if pulls := len(f.requestsTo("/w/v1/config/pull")); pulls > 2 {
+		t.Fatalf("revoked worker kept pulling without backoff: %d pulls", pulls)
+	}
+}
+
 func TestWorkerDeclaresRevocationCapabilities(t *testing.T) {
 	for _, want := range []string{"desired_state_enabled", "revoked_status"} {
 		found := false

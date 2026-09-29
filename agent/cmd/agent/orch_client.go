@@ -286,7 +286,9 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 			case err != nil:
 				slog.Warn("orch pull failed", "err", err)
 				pullFailed()
-			case !pull.OK && orchRevoked(pull.Status, pull.Code):
+			case orchRevoked(pull.Status, pull.Code):
+				// An older orchestrator reports revocation with ok set; it
+				// is handled like the rejection, not re-pulled at once.
 				enterRevokedState(cfg, st, &state)
 				sleepCtx(ctx, orchRevokedRetry)
 				continue

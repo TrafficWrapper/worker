@@ -13,6 +13,7 @@ if ! command -v nginx >/dev/null 2>&1; then
 fi
 work=$(mktemp -d)
 pid=""
+# shellcheck disable=SC2329 # called from the EXIT trap
 cleanup() {
   if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; fi
   rm -rf "$work"

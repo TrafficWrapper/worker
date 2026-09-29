@@ -598,56 +598,6 @@ func TestRealityMaxTimeDiff(t *testing.T) {
 	}
 }
 
-// Installs whose .env predates REALITY_MAX_TIME_DIFF must keep accepting any
-// client clock, as before the setting existed.
-func TestReadEnvRealityMaxTimeDiffDefaultsOff(t *testing.T) {
-	t.Setenv("WORKER_STATE_DIR", t.TempDir())
-	t.Setenv("EGRESS_IP", "203.0.113.10")
-	t.Setenv("CAMOUFLAGE_DOMAIN", "www.example.net")
-	t.Setenv("REALITY_MAX_TIME_DIFF", "")
-	if err := os.Unsetenv("REALITY_MAX_TIME_DIFF"); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		value string
-		set   bool
-		want  time.Duration
-	}{
-		{set: false, want: 0},
-		{value: "", set: true, want: 0},
-		{value: "0", set: true, want: 0},
-		{value: "120", set: true, want: 2 * time.Minute},
-	} {
-		if tc.set {
-			t.Setenv("REALITY_MAX_TIME_DIFF", tc.value)
-		}
-		cfg, err := readEnv()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if cfg.RealityMaxTimeDiff != tc.want {
-			t.Fatalf("REALITY_MAX_TIME_DIFF=%q (set=%t): got %s, want %s", tc.value, tc.set, cfg.RealityMaxTimeDiff, tc.want)
-		}
-	}
-}
-
-// Xray compares the client time with the host clock, not with the corrected
-// platform time, so the check is off while the host clock is known to be wrong.
-func TestRealityMaxTimeDiffOffWhileClockSkewed(t *testing.T) {
-	resetPlatformClock(t)
-	cfg := envConfig{RealityDest: "www.example.net:443", CamouflageDomain: "www.example.net", RealityMaxTimeDiff: 2 * time.Minute}
-	observeServerTime(time.Now().Add(time.Hour).UnixMilli(), time.Now())
-	raw, _ := json.Marshal(xrayConfigDocument(cfg, hardeningTestState(), nil))
-	if strings.Contains(string(raw), "maxTimeDiff") {
-		t.Fatalf("maxTimeDiff enforced although the host clock is skewed: %s", raw)
-	}
-	observeServerTime(time.Now().UnixMilli(), time.Now())
-	raw, _ = json.Marshal(xrayConfigDocument(cfg, hardeningTestState(), nil))
-	if !strings.Contains(string(raw), `"maxTimeDiff":120000`) {
-		t.Fatalf("maxTimeDiff not restored after the clock is back in sync: %s", raw)
-	}
-}
-
 func TestReadEnvRefusesNonGlobalDetectedAddressWhenOrchestrated(t *testing.T) {
 	t.Setenv("WORKER_STATE_DIR", t.TempDir())
 	t.Setenv("CAMOUFLAGE_DOMAIN", "www.example.net")

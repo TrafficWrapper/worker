@@ -308,8 +308,12 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 					orchDesiredSeqGauge.Store(pull.DesiredSeq)
 				}
 				state.Status = pull.Status
-				if pull.UpdateRef != nil {
-					apk.handle(ctx, cfg, client, state.WorkerID, *pull.UpdateRef)
+				// The release is checked against the client config, so it is
+				// handled after a client bundle in the same pull is written.
+				handleUpdateRef := func() {
+					if pull.UpdateRef != nil {
+						apk.handle(ctx, cfg, client, state.WorkerID, *pull.UpdateRef)
+					}
 				}
 				if pull.DiscoveryBundle != nil {
 					if err := publishDiscoveryBundle(cfg.StateDir, *pull.DiscoveryBundle); err != nil {
@@ -317,6 +321,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 					}
 				}
 				if pull.NotModified {
+					handleUpdateRef()
 					persist(state)
 					pullNeeded = false
 					pullRetry.reset()
@@ -328,9 +333,11 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 				var partial *partialApplyError
 				if err != nil && !errors.As(err, &partial) {
 					slog.Error("orch apply rejected", "err", err)
+					handleUpdateRef()
 					pullFailed()
 					break
 				}
+				handleUpdateRef()
 				// The bundle is accepted and cached even if a component
 				// failed; only that component is retried below.
 				setApplyIncomplete(partial != nil)

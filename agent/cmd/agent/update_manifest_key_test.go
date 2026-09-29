@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,5 +119,56 @@ func TestUpdateManifestUncheckedWithoutUsableKey(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestUpdateRefCheckedWithClientConfigFromSamePull(t *testing.T) {
+	priv, pubText := testSigner(t)
+	stateDir := t.TempDir()
+	twDir := filepath.Join(stateDir, "distributor", "tw")
+	oldPub, _ := newUpdateKey(t)
+	withUpdateKey(t, stateDir, oldPub)
+	// The pull rotates the update key and names a release signed with the
+	// new one.
+	newPub, newPriv := newUpdateKey(t)
+	apk := testAPKBytes(3000)
+	ref := signedAPKRef(t, newPriv, apk)
+	worker := signedBundleForTest(t, priv, pubText, "worker-config-v1", 2, `,"desired_state":{"approved_devices":[]}`)
+	client := signedBundleForTest(t, priv, pubText, "client-config-v1", 2, `,"update_pubkey":`+jsonString(newPub))
+	server := &fakeChunkServer{apk: apk}
+	f := newFakeOrchestrator(t, func(path string, raw json.RawMessage) any {
+		switch {
+		case strings.HasSuffix(path, "/config/pull"):
+			return map[string]any{"ok": true, "status": "active", "desired_seq": 2, "worker_bundle": worker, "client_bundle": client, "update_ref": ref}
+		case strings.HasSuffix(path, "/apk/chunk"):
+			var req orchAPKChunkRequest
+			_ = json.Unmarshal(raw, &req)
+			resp, _ := server.apkChunk(context.Background(), req)
+			return resp
+		default:
+			return map[string]any{"ok": true, "heartbeat": true, "desired_seq": 2}
+		}
+	})
+	cfg := envConfig{StateDir: stateDir, DisableSmokePeers: true, RealityDest: "www.example.net:443", CamouflageDomain: "www.example.net"}
+	if err := saveOrchState(stateDir, orchState{WorkerID: "w1", SignerPublicKey: pubText, AppliedSeq: 1, ClientAppliedSeq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runOrchestratorLoop(ctx, cfg, hardeningTestState(), f.client(cfg))
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !fileExists(filepath.Join(twDir, "update-manifest.json")) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if loadOrchState(stateDir).AppliedSeq != 2 {
+		t.Fatal("pull not applied")
+	}
+	if !fileExists(filepath.Join(twDir, "update-manifest.json")) || !fileExists(filepath.Join(twDir, "app.apk")) {
+		t.Fatal("release signed with the rotated update key not published")
 	}
 }

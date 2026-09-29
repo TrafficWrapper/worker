@@ -1,17 +1,21 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -214,17 +218,16 @@ func runGateway(path string) error {
 	}
 
 	uapi, err := ipc.UAPIListen(cfg.Interface, uapiFile)
+	uapiFile.Close() // the listener holds its own copy of the socket
 	if err != nil {
-		uapiFile.Close()
 		return fmt.Errorf("listen on UAPI socket: %w", err)
 	}
-	defer uapi.Close()
-
-	errs := make(chan error, 1)
-	go serveUAPI(dev, uapi, errs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	errs := make(chan error, 1)
+	go serveUAPI(ctx, dev, uapi, func() (net.Listener, error) { return openUAPI(cfg.Interface) }, errs)
 
 	go runRateLimits(ctx, cfg.Interface, cfg.PeerRegistry)
 
@@ -255,26 +258,84 @@ func awgLogLevel(value string) (int, error) {
 	}
 }
 
-// serveUAPI accepts UAPI connections until the listener is closed. A failed
-// Accept (for example running out of file descriptors) is retried with a
-// short backoff instead of stopping the gateway and every tunnel with it.
-func serveUAPI(dev uapiHandler, uapi net.Listener, errs chan<- error) {
-	delay := uapiAcceptMinDelay
+// serveUAPI accepts UAPI connections until ctx ends. The amneziawg-go
+// UAPIListener stops for good after its first error: its accept goroutine
+// exits, and a deleted socket file is reported the same way, so calling
+// Accept on it again would block forever while the gateway looks healthy and
+// peer changes and revocations never arrive. A failed listener is therefore
+// closed and replaced with a fresh socket; if that keeps failing, the error
+// is returned so the gateway exits and is restarted instead of running
+// without UAPI.
+func serveUAPI(ctx context.Context, dev uapiHandler, uapi net.Listener, reopen func() (net.Listener, error), errs chan<- error) {
+	// Closing the current listener on shutdown ends a blocked Accept and
+	// removes the socket file.
+	var mu sync.Mutex
+	current := uapi
+	stop := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		current.Close()
+	})
+	defer stop()
 	for {
 		c, err := uapi.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				errs <- err
-				return
-			}
-			fmt.Fprintf(os.Stderr, "uapi accept failed, retrying in %s: %v\n", delay, err)
-			time.Sleep(delay)
-			delay = min(delay*2, uapiAcceptMaxDelay)
+		if err == nil {
+			go dev.IpcHandle(c)
 			continue
 		}
-		delay = uapiAcceptMinDelay
-		go dev.IpcHandle(c)
+		if ctx.Err() != nil {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "uapi listener failed, reopening the socket: %v\n", err)
+		uapi.Close()
+		next, rerr := reopenUAPI(ctx, reopen)
+		if rerr != nil {
+			if ctx.Err() == nil {
+				errs <- fmt.Errorf("uapi listener failed (%v) and could not be reopened: %w", err, rerr)
+			}
+			return
+		}
+		mu.Lock()
+		if ctx.Err() != nil {
+			mu.Unlock()
+			next.Close()
+			return
+		}
+		uapi, current = next, next
+		mu.Unlock()
+		fmt.Fprintln(os.Stderr, "uapi socket reopened")
 	}
+}
+
+// reopenUAPI retries reopen with a growing delay, giving up after
+// uapiReopenAttempts tries.
+func reopenUAPI(ctx context.Context, reopen func() (net.Listener, error)) (net.Listener, error) {
+	delay := uapiReopenMinDelay
+	var err error
+	for attempt := 0; attempt < uapiReopenAttempts; attempt++ {
+		var l net.Listener
+		if l, err = reopen(); err == nil {
+			return l, nil
+		}
+		fmt.Fprintf(os.Stderr, "uapi reopen failed, retrying in %s: %v\n", delay, err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, uapiReopenMaxDelay)
+	}
+	return nil, err
+}
+
+// openUAPI creates the interface's UAPI socket and listens on it.
+func openUAPI(iface string) (net.Listener, error) {
+	f, err := ipc.UAPIOpen(iface)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return ipc.UAPIListen(iface, f)
 }
 
 // uapiHandler is the part of *device.Device serveUAPI needs.
@@ -283,8 +344,9 @@ type uapiHandler interface {
 }
 
 var (
-	uapiAcceptMinDelay = 50 * time.Millisecond
-	uapiAcceptMaxDelay = 5 * time.Second
+	uapiReopenMinDelay = 100 * time.Millisecond
+	uapiReopenMaxDelay = 5 * time.Second
+	uapiReopenAttempts = 10
 )
 
 func applyDeviceConfig(dev *device.Device, cfg Config) error {
@@ -609,8 +671,45 @@ func runHealthcheck(args []string) error {
 	if out, err := runCommand("ip", "link", "show", "dev", cfg.Interface); err != nil {
 		return fmt.Errorf("healthcheck ip link: %w: %s", err, strings.TrimSpace(string(out)))
 	}
+	sock := filepath.Join(uapiSocketDirectory, cfg.Interface+".sock")
+	if err := probeUAPI(sock); err != nil {
+		return fmt.Errorf("healthcheck uapi %s: %w", sock, err)
+	}
 	fmt.Printf("awg-gw run mode healthy interface=%s\n", cfg.Interface)
 	return nil
+}
+
+// uapiSocketDirectory is where amneziawg-go puts UAPI sockets; the image
+// sets it, like ipc.socketDirectory, at link time.
+var uapiSocketDirectory = "/var/run/amneziawg"
+
+// probeUAPI asks the gateway for its configuration over the UAPI socket, so
+// a gateway whose UAPI no longer answers is reported unhealthy.
+var probeUAPI = func(path string) error {
+	c, err := net.DialTimeout("unix", path, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.WriteString(c, "get=1\n\n"); err != nil {
+		return err
+	}
+	sc := bufio.NewScanner(c)
+	sc.Buffer(make([]byte, 64<<10), 16<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "errno=") {
+			if line != "errno=0" {
+				return fmt.Errorf("uapi answered %s", line)
+			}
+			return nil
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	return errors.New("uapi closed without an answer")
 }
 
 func validateConfigCommand(path string) error {

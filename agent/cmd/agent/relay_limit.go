@@ -21,6 +21,12 @@ const (
 	relayMaxDevices     = 4096
 	relayDeviceIdleTTL  = 10 * time.Minute
 	relayMaxDeviceIDLen = 128
+	// Posts naming a device this worker does not serve (or none) share one
+	// small bucket, so made-up X-TW-Device values cannot spend the budget of
+	// the worker's approved devices.
+	relayUnknownRate  = 0.2
+	relayUnknownBurst = 3
+	relayUnknownKey   = "\x00unknown"
 )
 
 type tokenBucket struct {
@@ -45,8 +51,11 @@ func (b *tokenBucket) take(now time.Time, rate float64, burst int) (bool, time.D
 }
 
 type relayLimiter struct {
-	mu      sync.Mutex
-	now     func() time.Time
+	mu  sync.Mutex
+	now func() time.Time
+	// known reports whether a device ID is one of the worker's approved
+	// devices; nil treats every ID as known.
+	known   func(deviceID string) bool
 	global  tokenBucket
 	devices map[string]*tokenBucket
 	slots   chan struct{}
@@ -64,13 +73,17 @@ func newRelayLimiter() *relayLimiter {
 // the delay a client should wait before retrying.
 func (l *relayLimiter) acquire(deviceID string) (func(), time.Duration) {
 	key := relayDeviceKey(deviceID)
+	rate, burst := relayDeviceRate, relayDeviceBurst
+	if l.known != nil && (key == "" || !l.known(key)) {
+		key, rate, burst = relayUnknownKey, relayUnknownRate, relayUnknownBurst
+	}
 	l.mu.Lock()
 	now := l.now()
 	bucket := l.deviceBucket(key, now)
 	// Check the device first so one noisy device cannot spend the shared
 	// budget, and only spend its token when the global budget allows it too.
 	probe := *bucket
-	if ok, wait := probe.take(now, relayDeviceRate, relayDeviceBurst); !ok {
+	if ok, wait := probe.take(now, rate, burst); !ok {
 		*bucket = probe
 		l.mu.Unlock()
 		return nil, wait
@@ -130,4 +143,32 @@ func retryAfterSeconds(wait time.Duration) int {
 		return 1
 	}
 	return s
+}
+
+// approvedDeviceIDsTTL is how long the approved device IDs read from the
+// cached worker config are reused.
+const approvedDeviceIDsTTL = 30 * time.Second
+
+// approvedDeviceIDs returns a lookup of the device IDs in the cached worker
+// config, reread at most every approvedDeviceIDsTTL. A device approved since
+// is only rate limited as unknown until then, not refused.
+func approvedDeviceIDs(stateDir string) func(string) bool {
+	var (
+		mu     sync.Mutex
+		ids    map[string]struct{}
+		loaded time.Time
+	)
+	return func(deviceID string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if now := time.Now(); ids == nil || now.Sub(loaded) > approvedDeviceIDsTTL {
+			ids = map[string]struct{}{}
+			for _, device := range cachedDesiredState(stateDir).devices {
+				ids[relayDeviceKey(device.DeviceID)] = struct{}{}
+			}
+			loaded = now
+		}
+		_, ok := ids[deviceID]
+		return ok
+	}
 }

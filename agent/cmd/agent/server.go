@@ -152,6 +152,7 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 
 func telemetryHandler(cfg envConfig, st stateFile) http.HandlerFunc {
 	limiter := newRelayLimiter()
+	limiter.known = approvedDeviceIDs(cfg.StateDir)
 	// One client for the handler's lifetime keeps the HTTPS connection to the
 	// orchestrator alive between telemetry posts.
 	var (

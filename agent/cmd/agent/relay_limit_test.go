@@ -107,3 +107,32 @@ func TestTelemetryHandlerAnswers429WithRetryAfter(t *testing.T) {
 		t.Fatalf("body %s", last.Body.String())
 	}
 }
+
+func TestRelayUnknownDeviceIDsCannotSpendApprovedBudget(t *testing.T) {
+	l, now := fakeClockLimiter()
+	l.known = func(id string) bool { return id == "dev-approved" }
+	// A client rotating X-TW-Device through made-up IDs.
+	for i := 0; i < 200; i++ {
+		if release, _ := l.acquire("rotating-" + strconv.Itoa(i)); release != nil {
+			release()
+		}
+		*now = now.Add(100 * time.Millisecond)
+	}
+	release, wait := l.acquire("dev-approved")
+	if release == nil {
+		t.Fatalf("approved device starved by rotating unknown IDs (wait %v)", wait)
+	}
+	release()
+}
+
+func TestApprovedDeviceIDsReadsCachedConfig(t *testing.T) {
+	stateDir := t.TempDir()
+	writeCachedApprovedDevicesForTest(t, stateDir, []approvedDevice{{DeviceID: "dev-1", RealityUUID: "11111111-1111-4111-8111-111111111111", AWGPublicKey: keyB64(3), PSK2: keyB64(4), InternalIP: "10.13.13.10/32", Status: "approved"}}, 1)
+	known := approvedDeviceIDs(stateDir)
+	if !known("dev-1") {
+		t.Fatal("approved device not known")
+	}
+	if known("dev-2") || known("") {
+		t.Fatal("unknown device reported as approved")
+	}
+}

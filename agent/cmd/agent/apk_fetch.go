@@ -73,6 +73,9 @@ type apkDownloader struct {
 	mu      sync.Mutex
 	running string // sha256 being downloaded
 	done    chan struct{}
+	// pending is the release being fetched, kept after a failed attempt so
+	// the cleanup leaves its partial download for the retry to resume.
+	pending orchUpdateRef
 }
 
 // handle publishes the release named by ref: the manifest alone when the
@@ -98,15 +101,20 @@ func (d *apkDownloader) handle(ctx context.Context, cfg envConfig, client apkChu
 		return
 	}
 	d.running = ref.APKSHA256
+	d.pending = ref
 	d.done = make(chan struct{})
 	go func() {
-		defer func() {
-			d.mu.Lock()
-			d.running = ""
-			close(d.done)
-			d.mu.Unlock()
-		}()
-		if err := downloadAPK(ctx, cfg, client, workerID, ref); err != nil {
+		err := downloadAPK(ctx, cfg, client, workerID, ref)
+		d.mu.Lock()
+		d.running = ""
+		// Cleared only after the manifest names the APK, so the cleanup
+		// always keeps it through one of the two.
+		if err == nil {
+			d.pending = orchUpdateRef{}
+		}
+		close(d.done)
+		d.mu.Unlock()
+		if err != nil {
 			slog.Warn("apk download failed; will retry on a later pull", "apk", ref.APKName, "err", err)
 			return
 		}
@@ -124,10 +132,16 @@ func (d *apkDownloader) wait() {
 	}
 }
 
-func (d *apkDownloader) inProgress() string {
+// pendingRef returns the release being fetched or retried; its APK and
+// partial download are kept by the cleanup.
+func (d *apkDownloader) pendingRef() *orchUpdateRef {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.running
+	if d.pending.APKSHA256 == "" {
+		return nil
+	}
+	ref := d.pending
+	return &ref
 }
 
 func validateUpdateRef(ref orchUpdateRef) error {
@@ -261,7 +275,7 @@ func downloadAPK(ctx context.Context, cfg envConfig, client apkChunkFetcher, wor
 	if err := publishUpdateManifest(cfg.StateDir, ref.ManifestJSON, ref.ManifestMinisig); err != nil {
 		return err
 	}
-	return cleanupDistributedAPKs(cfg.StateDir, "")
+	return cleanupDistributedAPKs(cfg.StateDir, nil)
 }
 
 // publishUpdateManifest writes the manifest and its signature once the APK
@@ -314,8 +328,11 @@ func manifestExpired(manifestJSON string, now time.Time) bool {
 
 // cleanupDistributedAPKs removes APKs and partial downloads the current
 // manifest does not reference (WRK-L6), and withdraws an expired manifest.
-// Everything else in distributor/tw is left alone.
-func cleanupDistributedAPKs(stateDir, downloading string) error {
+// The APK and partial download of pending, a release still being fetched or
+// published, are kept. Everything else in distributor/tw is left alone.
+// pending must be read before the call: once the downloader clears it, the
+// manifest read here already names its APK.
+func cleanupDistributedAPKs(stateDir string, pending *orchUpdateRef) error {
 	twDir := filepath.Join(stateDir, "distributor", "tw")
 	manifestPath := filepath.Join(twDir, "update-manifest.json")
 	raw, err := os.ReadFile(manifestPath)
@@ -344,6 +361,9 @@ func cleanupDistributedAPKs(stateDir, downloading string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
+		if pending != nil && name == pending.APKName {
+			continue
+		}
 		if entry.Type().IsRegular() && strings.HasSuffix(name, ".apk") && name != keepAPK {
 			if err := os.Remove(filepath.Join(twDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 				errs = append(errs, err)
@@ -352,7 +372,7 @@ func cleanupDistributedAPKs(stateDir, downloading string) error {
 	}
 	tmpEntries, _ := os.ReadDir(filepath.Join(twDir, apkTmpDir))
 	for _, entry := range tmpEntries {
-		if downloading != "" && entry.Name() == downloading+".part" {
+		if pending != nil && entry.Name() == pending.APKSHA256+".part" {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(twDir, apkTmpDir, entry.Name())); err != nil {

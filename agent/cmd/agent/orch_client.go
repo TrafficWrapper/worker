@@ -407,7 +407,7 @@ func runOrchestratorLoop(ctx context.Context, cfg envConfig, st stateFile, clien
 		if time.Since(lastAck) >= cfg.OrchAckInterval {
 			probeTunnelServices(cfg)
 			reportOrchAck(ctx, client, cfg, st, state.WorkerID, state.AppliedSeq, state.ClientAppliedSeq)
-			if err := cleanupDistributedAPKs(cfg.StateDir, apk.inProgress()); err != nil {
+			if err := cleanupDistributedAPKs(cfg.StateDir, apk.pendingRef()); err != nil {
 				slog.Warn("distributor cleanup incomplete", "err", err)
 			}
 			reconcileStarted := time.Now()
@@ -877,7 +877,7 @@ func writeUpdateArtifact(cfg envConfig, update *orchUpdateArtifact) error {
 	if err := publishUpdateManifest(cfg.StateDir, update.ManifestJSON, update.ManifestMinisig); err != nil {
 		return err
 	}
-	return cleanupDistributedAPKs(cfg.StateDir, "")
+	return cleanupDistributedAPKs(cfg.StateDir, nil)
 }
 
 func updateManifestAPKSHA256(manifestJSON string) (string, error) {

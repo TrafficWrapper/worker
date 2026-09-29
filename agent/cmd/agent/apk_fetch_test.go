@@ -185,7 +185,7 @@ func TestExpiredManifestIsNotServed(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := cleanupDistributedAPKs(stateDir, ""); err != nil {
+	if err := cleanupDistributedAPKs(stateDir, nil); err != nil {
 		t.Fatal(err)
 	}
 	if fileExists(filepath.Join(twDir, "update-manifest.json")) || fileExists(filepath.Join(twDir, "update-manifest.json.minisig")) {
@@ -264,5 +264,121 @@ func TestSplitUsageReports(t *testing.T) {
 	got := splitUsageReports(usage, 3)
 	if len(got) != 3 || len(got[0]) != 3 || len(got[2]) != 1 {
 		t.Fatalf("split: %v", got)
+	}
+}
+
+// publishTestManifest publishes a release as if an earlier download had
+// finished, so the cleanup has a current manifest to go by.
+func publishTestManifest(t *testing.T, stateDir string, ref orchUpdateRef, apk []byte) {
+	t.Helper()
+	twDir := filepath.Join(stateDir, "distributor", "tw")
+	if err := writeFile(filepath.Join(twDir, ref.APKName), apk, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishUpdateManifest(stateDir, ref.ManifestJSON, ref.ManifestMinisig); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCleanupKeepsAPKWhoseManifestIsBeingPublished(t *testing.T) {
+	// The periodic cleanup runs on the loop while the download goroutine
+	// moves the new APK in place and then publishes its manifest.
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stateDir := t.TempDir()
+			twDir := filepath.Join(stateDir, "distributor", "tw")
+			oldAPK := testAPKBytes(100 + i)
+			if err := writeFile(filepath.Join(twDir, "app-v1.apk"), oldAPK, 0o644); err != nil {
+				t.Error(err)
+				return
+			}
+			old := testAPKRef(t, oldAPK, "app-v1.apk", time.Now().Add(time.Hour))
+			if err := publishUpdateManifest(stateDir, old.ManifestJSON, old.ManifestMinisig); err != nil {
+				t.Error(err)
+				return
+			}
+			apk := testAPKBytes(3000 + i)
+			ref := testAPKRef(t, apk, "app-v2.apk", time.Now().Add(time.Hour))
+			d := &apkDownloader{}
+			d.handle(t.Context(), envConfig{StateDir: stateDir}, &fakeChunkServer{apk: apk}, "w1", ref)
+			finished := make(chan struct{})
+			go func() {
+				d.wait()
+				close(finished)
+			}()
+			for running := true; running; {
+				select {
+				case <-finished:
+					running = false
+				default:
+				}
+				if err := cleanupDistributedAPKs(stateDir, d.pendingRef()); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+			manifest, _ := os.ReadFile(filepath.Join(twDir, "update-manifest.json"))
+			if !strings.Contains(string(manifest), ref.APKSHA256) {
+				t.Errorf("new manifest not published: %s", manifest)
+				return
+			}
+			if !fileExists(filepath.Join(twDir, "app-v2.apk")) {
+				t.Error("manifest published for an APK the cleanup removed")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// cancellingChunkServer serves one chunk and then ends the attempt, like a
+// download cut short by a network error.
+type cancellingChunkServer struct {
+	fakeChunkServer
+	cancel context.CancelFunc
+}
+
+func (c *cancellingChunkServer) apkChunk(ctx context.Context, req orchAPKChunkRequest) (orchAPKChunkResponse, error) {
+	resp, err := c.fakeChunkServer.apkChunk(ctx, req)
+	c.cancel()
+	return resp, err
+}
+
+func TestCleanupKeepsPartialDownloadBetweenAttempts(t *testing.T) {
+	stateDir := t.TempDir()
+	twDir := filepath.Join(stateDir, "distributor", "tw")
+	oldAPK := testAPKBytes(100)
+	publishTestManifest(t, stateDir, testAPKRef(t, oldAPK, "app-v1.apk", time.Now().Add(time.Hour)), oldAPK)
+	apk := testAPKBytes(apkChunkSize + 1234)
+	ref := testAPKRef(t, apk, "app-v2.apk", time.Now().Add(time.Hour))
+	ctx, cancel := context.WithCancel(t.Context())
+	server := &cancellingChunkServer{fakeChunkServer: fakeChunkServer{apk: apk}, cancel: cancel}
+	d := &apkDownloader{}
+	d.handle(ctx, envConfig{StateDir: stateDir}, server, "w1", ref)
+	d.wait()
+	part := filepath.Join(twDir, apkTmpDir, ref.APKSHA256+".part")
+	if info, err := os.Stat(part); err != nil || info.Size() != apkChunkSize {
+		t.Fatalf("first attempt did not leave a partial download: %v", err)
+	}
+	if err := cleanupDistributedAPKs(stateDir, d.pendingRef()); err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(part) {
+		t.Fatal("cleanup removed the partial download of the release being retried")
+	}
+	// The next pull hands over the same release and the download resumes.
+	full := &fakeChunkServer{apk: apk}
+	d.handle(t.Context(), envConfig{StateDir: stateDir}, full, "w1", ref)
+	d.wait()
+	if len(full.requests) == 0 || full.requests[0].Offset != apkChunkSize {
+		t.Fatalf("retry did not resume: %+v", full.requests)
+	}
+	if !fileExists(filepath.Join(twDir, "app-v2.apk")) || fileExists(part) {
+		t.Fatal("retry did not publish the apk")
+	}
+	if d.pendingRef() != nil {
+		t.Fatal("published release still pending")
 	}
 }

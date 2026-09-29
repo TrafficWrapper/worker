@@ -161,7 +161,9 @@ func readEnv() (envConfig, error) {
 		return envConfig{}, errors.New("ORCH_ACK_INTERVAL must be a duration between 10s and 1h")
 	}
 	cfg.OrchAckInterval = ackInterval
-	maxTimeDiff, err := getenvIntInRange("REALITY_MAX_TIME_DIFF", 120, 0, 3600)
+	// Off unless set: an install whose .env predates the key keeps accepting
+	// clients with badly wrong clocks, as before.
+	maxTimeDiff, err := getenvIntInRange("REALITY_MAX_TIME_DIFF", 0, 0, 3600)
 	if err != nil {
 		return envConfig{}, err
 	}

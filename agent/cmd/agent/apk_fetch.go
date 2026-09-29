@@ -29,6 +29,9 @@ const (
 	apkChunkPause    = time.Second
 	apkChunkAttempts = 5
 	apkTmpDir        = ".tmp"
+	// apkStaleTempAge is how old a writeFile temp file in distributor/tw
+	// must be before the cleanup treats it as abandoned.
+	apkStaleTempAge = 10 * time.Minute
 )
 
 var apkSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -329,45 +332,56 @@ func manifestExpired(manifestJSON string, now time.Time) bool {
 // cleanupDistributedAPKs removes APKs and partial downloads the current
 // manifest does not reference (WRK-L6), and withdraws an expired manifest.
 // The APK and partial download of pending, a release still being fetched or
-// published, are kept. Everything else in distributor/tw is left alone.
+// published, are kept. Temp files that writeFile left behind when a write
+// was interrupted are removed once they are too old to belong to a write in
+// progress. Everything else in distributor/tw is left alone.
 // pending must be read before the call: once the downloader clears it, the
 // manifest read here already names its APK.
 func cleanupDistributedAPKs(stateDir string, pending *orchUpdateRef) error {
 	twDir := filepath.Join(stateDir, "distributor", "tw")
-	manifestPath := filepath.Join(twDir, "update-manifest.json")
-	raw, err := os.ReadFile(manifestPath)
-	if err != nil {
-		// Without a manifest nothing says which APK is current.
-		return nil
-	}
-	if manifestExpired(string(raw), platformNow()) {
-		slog.Warn("update manifest expired; withdrawing it")
-		var errs []error
-		for _, name := range []string{"update-manifest.json", "update-manifest.json.minisig"} {
-			if err := os.Remove(filepath.Join(twDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				errs = append(errs, err)
+	var errs []error
+	// Without a usable manifest nothing says which APK is current, so APKs
+	// are left alone.
+	keepAPK := ""
+	if raw, err := os.ReadFile(filepath.Join(twDir, "update-manifest.json")); err == nil {
+		if manifestExpired(string(raw), platformNow()) {
+			slog.Warn("update manifest expired; withdrawing it")
+			for _, name := range []string{"update-manifest.json", "update-manifest.json.minisig"} {
+				if err := os.Remove(filepath.Join(twDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					errs = append(errs, err)
+				}
 			}
+		} else {
+			keepAPK = currentManifestAPKName(raw)
 		}
+	}
+	entries, err := os.ReadDir(twDir)
+	if errors.Is(err, os.ErrNotExist) {
 		return errors.Join(errs...)
 	}
-	keepAPK := currentManifestAPKName(raw)
-	if keepAPK == "" {
-		return nil
-	}
-	var errs []error
-	entries, err := os.ReadDir(twDir)
 	if err != nil {
-		return err
+		return errors.Join(append(errs, err)...)
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if pending != nil && name == pending.APKName {
+		if !entry.Type().IsRegular() || (pending != nil && name == pending.APKName) {
 			continue
 		}
-		if entry.Type().IsRegular() && strings.HasSuffix(name, ".apk") && name != keepAPK {
-			if err := os.Remove(filepath.Join(twDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				errs = append(errs, err)
+		switch {
+		case strings.HasSuffix(name, ".apk"):
+			if keepAPK == "" || name == keepAPK {
+				continue
 			}
+		case strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".tmp"):
+			info, err := entry.Info()
+			if err != nil || time.Since(info.ModTime()) < apkStaleTempAge {
+				continue
+			}
+		default:
+			continue
+		}
+		if err := os.Remove(filepath.Join(twDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
 		}
 	}
 	tmpEntries, _ := os.ReadDir(filepath.Join(twDir, apkTmpDir))

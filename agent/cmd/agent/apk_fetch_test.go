@@ -382,3 +382,54 @@ func TestCleanupKeepsPartialDownloadBetweenAttempts(t *testing.T) {
 		t.Fatal("published release still pending")
 	}
 }
+
+func TestCleanupRemovesStaleWriteTemps(t *testing.T) {
+	apk := testAPKBytes(100)
+	ref := testAPKRef(t, apk, "app-v1.apk", time.Now().Add(time.Hour))
+	for name, withManifest := range map[string]bool{"manifest": true, "no manifest": false} {
+		t.Run(name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			twDir := filepath.Join(stateDir, "distributor", "tw")
+			if withManifest {
+				publishTestManifest(t, stateDir, ref, apk)
+			}
+			// Orphans of interrupted writes, old enough to be abandoned.
+			stale := []string{".app-v2.apk.123.tmp", ".config.json.456.tmp", filepath.Join(apkTmpDir, "old.part")}
+			// A write still in progress is recent; the published files stay
+			// however old they are.
+			kept := []string{".app-v3.apk.789.tmp", "config.json", "config.json.minisig", "endpoints.json", "endpoints.json.minisig", "version.json", "keep.txt"}
+			if withManifest {
+				kept = append(kept, "app-v1.apk", "update-manifest.json", "update-manifest.json.minisig")
+			} else {
+				// Without a manifest nothing says which APK is current.
+				kept = append(kept, "other.apk")
+			}
+			for _, name := range append(append([]string{}, stale...), kept...) {
+				if !fileExists(filepath.Join(twDir, name)) {
+					if err := writeFile(filepath.Join(twDir, name), []byte("x"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if name != ".app-v3.apk.789.tmp" {
+					old := time.Now().Add(-time.Hour)
+					if err := os.Chtimes(filepath.Join(twDir, name), old, old); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := cleanupDistributedAPKs(stateDir, nil); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range stale {
+				if fileExists(filepath.Join(twDir, name)) {
+					t.Errorf("%s not cleaned up", name)
+				}
+			}
+			for _, name := range kept {
+				if !fileExists(filepath.Join(twDir, name)) {
+					t.Errorf("cleanup removed %s", name)
+				}
+			}
+		})
+	}
+}

@@ -78,3 +78,22 @@ func TestXrayResolvesOnceAndDropsPrivateAnswers(t *testing.T) {
 		t.Fatal("private egress opt-out still forces IP resolution")
 	}
 }
+
+// A public name that points at the worker's own public address must be
+// dropped by the resolver like the private ranges.
+func TestXrayDNSDropsWorkerOwnAddresses(t *testing.T) {
+	cfg := envConfig{EgressIP: "203.0.113.10", PublicAddress: "worker.example.net", PublicAddressV6: "2001:db8::10"}
+	raw, _ := json.Marshal(xrayConfigDocument(cfg, hardeningTestState(), nil)["dns"])
+	for _, want := range []string{`"203.0.113.10"`, `"2001:db8::10"`, `"169.254.0.0/16"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("dns missing %s: %s", want, raw)
+		}
+	}
+	if strings.Contains(string(raw), "worker.example.net") {
+		t.Fatalf("dns filter got a host name: %s", raw)
+	}
+	cfg.AllowPrivateEgress = true
+	if _, ok := xrayConfigDocument(cfg, hardeningTestState(), nil)["dns"]; ok {
+		t.Fatal("private egress opt-out still filters DNS")
+	}
+}

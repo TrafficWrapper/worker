@@ -256,8 +256,9 @@ func xrayDirectOutbound(cfg envConfig) map[string]any {
 	return outbound
 }
 
-// xrayDNS drops private addresses from every answer, so a public name can
-// never resolve to the agent, the host or a metadata service.
+// xrayDNS drops private addresses and the worker's own public addresses from
+// every answer, so a public name can never resolve to the agent, the host or
+// a metadata service.
 func xrayDNS(cfg envConfig) map[string]any {
 	if cfg.AllowPrivateEgress {
 		return nil
@@ -266,7 +267,7 @@ func xrayDNS(cfg envConfig) map[string]any {
 		"queryStrategy": "UseIPv4",
 		"servers": []any{map[string]any{
 			"address":       "localhost",
-			"unexpectedIPs": privateEgressCIDRs,
+			"unexpectedIPs": append(slices.Clone(privateEgressCIDRs), workerAddresses(cfg)...),
 		}},
 	}
 }

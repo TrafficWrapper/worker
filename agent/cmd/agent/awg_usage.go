@@ -73,12 +73,16 @@ func buildAWGUsageReports(devices []approvedDevice, peers []awgPeerConfig, previ
 		next[key] = value
 	}
 	reports := make([]orchUsageReport, 0, len(devices))
+	// A peer belongs to the first device naming its key, as in the peer
+	// registry (awgKeyIdentity); later devices with the same key bytes are
+	// not charged for it.
+	owners := map[string]string{}
 	for _, device := range devices {
 		deviceID := device.DeviceID
 		if deviceID == "" && device.AWGPublicKey != "" {
 			deviceID = device.AWGPublicKey
 		}
-		report, ok := buildAWGUsageReportForDevice(device, deviceID, peerByHex, next, now)
+		report, ok := buildAWGUsageReportForDevice(device, deviceID, peerByHex, owners, next, now)
 		if !ok {
 			continue
 		}
@@ -87,25 +91,26 @@ func buildAWGUsageReports(devices []approvedDevice, peers []awgPeerConfig, previ
 	return reports, next
 }
 
-func buildAWGUsageReportForDevice(device approvedDevice, deviceID string, peerByHex map[string][]awgPeerConfig, next awgUsageState, now time.Time) (orchUsageReport, bool) {
+func buildAWGUsageReportForDevice(device approvedDevice, deviceID string, peerByHex map[string][]awgPeerConfig, owners map[string]string, next awgUsageState, now time.Time) (orchUsageReport, bool) {
 	candidates := []approvedDeviceAWGProfile{}
+	// Keys are compared by their bytes: two texts of one key are one peer.
 	seenCandidate := map[string]struct{}{}
 	if strings.TrimSpace(device.AWGPublicKey) != "" {
 		key := strings.TrimSpace(device.AWGPublicKey)
 		candidates = append(candidates, approvedDeviceAWGProfile{AWGPublicKey: key})
-		seenCandidate[key] = struct{}{}
+		seenCandidate[awgKeyIdentity(key)] = struct{}{}
 	}
 	for _, creds := range device.AWGProfiles {
 		key := strings.TrimSpace(creds.AWGPublicKey)
 		if key == "" {
 			continue
 		}
-		if _, ok := seenCandidate[key]; ok {
+		if _, ok := seenCandidate[awgKeyIdentity(key)]; ok {
 			continue
 		}
 		creds.AWGPublicKey = key
 		candidates = append(candidates, creds)
-		seenCandidate[key] = struct{}{}
+		seenCandidate[awgKeyIdentity(key)] = struct{}{}
 	}
 	if deviceID == "" && len(candidates) > 0 {
 		deviceID = candidates[0].AWGPublicKey
@@ -126,6 +131,11 @@ func buildAWGUsageReportForDevice(device approvedDevice, deviceID string, peerBy
 			continue
 		}
 		for i, peer := range peers {
+			owner := pubHex + "@" + peer.Profile
+			if first, ok := owners[owner]; ok && first != deviceID {
+				continue
+			}
+			owners[owner] = deviceID
 			matched = true
 			if reportKey == "" {
 				reportKey = creds.AWGPublicKey

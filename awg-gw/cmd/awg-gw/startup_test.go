@@ -1,16 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -49,27 +45,10 @@ func writeTestConfig(t *testing.T, cfg Config) string {
 	return path
 }
 
-// stubUAPIProbe makes the healthcheck's UAPI probe succeed and records the
-// socket paths it was asked about.
-func stubUAPIProbe(t *testing.T) *[]string {
-	t.Helper()
-	var probed []string
-	old := probeUAPI
-	probeUAPI = func(path string) error { probed = append(probed, path); return nil }
-	t.Cleanup(func() { probeUAPI = old })
-	return &probed
-}
-
 func TestHealthcheckChecksInterfaceOfGivenConfig(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Interface = "awg2"
 	path := writeTestConfig(t, cfg)
-	probed := stubUAPIProbe(t)
-	defer func() {
-		if want := filepath.Join(uapiSocketDirectory, "awg2.sock"); len(*probed) != 1 || (*probed)[0] != want {
-			t.Errorf("healthcheck probed %v, want %s", *probed, want)
-		}
-	}()
 
 	ran := fakeCommands(t, nil)
 	if err := runHealthcheck([]string{"--config", path}); err != nil {
@@ -219,204 +198,30 @@ type countingHandler struct{ handled chan net.Conn }
 
 func (h countingHandler) IpcHandle(c net.Conn) { h.handled <- c }
 
-// deadAfterErrorListener behaves like amneziawg-go's UAPIListener: after
-// the first error its accept goroutine is gone and Accept blocks until Close.
-type deadAfterErrorListener struct {
-	err    error
-	once   sync.Once
-	failed bool
-	closed chan struct{}
-}
-
-func newDeadAfterErrorListener(err error) *deadAfterErrorListener {
-	return &deadAfterErrorListener{err: err, closed: make(chan struct{})}
-}
-
-func (l *deadAfterErrorListener) Accept() (net.Conn, error) {
-	if !l.failed {
-		l.failed = true
-		return nil, l.err
-	}
-	<-l.closed
-	return nil, net.ErrClosed
-}
-func (l *deadAfterErrorListener) Close() error {
-	l.once.Do(func() { close(l.closed) })
-	return nil
-}
-func (l *deadAfterErrorListener) Addr() net.Addr { return nil }
-
-func fastUAPIReopen(t *testing.T) {
-	t.Helper()
-	oldMin, oldMax, oldN := uapiReopenMinDelay, uapiReopenMaxDelay, uapiReopenAttempts
-	uapiReopenMinDelay, uapiReopenMaxDelay, uapiReopenAttempts = time.Millisecond, 2*time.Millisecond, 3
-	t.Cleanup(func() { uapiReopenMinDelay, uapiReopenMaxDelay, uapiReopenAttempts = oldMin, oldMax, oldN })
-}
-
-func TestServeUAPIReopensListenerAfterAcceptError(t *testing.T) {
-	fastUAPIReopen(t)
-	for _, cause := range []error{syscall.EMFILE, os.ErrNotExist} {
-		first := newDeadAfterErrorListener(cause)
-		client, server := net.Pipe()
-		defer client.Close()
-		second := &scriptedListener{steps: []func() (net.Conn, error){
-			func() (net.Conn, error) { return server, nil },
-			func() (net.Conn, error) { select {} },
-		}}
-		reopened := 0
-		reopen := func() (net.Listener, error) {
-			reopened++
-			if reopened == 1 {
-				return nil, syscall.EMFILE // one failed attempt is retried
-			}
-			return second, nil
-		}
-		h := countingHandler{handled: make(chan net.Conn, 1)}
-		errs := make(chan error, 1)
-		go serveUAPI(t.Context(), h, first, reopen, errs)
-		select {
-		case c := <-h.handled:
-			if c != server {
-				t.Fatal("wrong connection handled")
-			}
-		case err := <-errs:
-			t.Fatalf("%v: serveUAPI gave up: %v", cause, err)
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%v: no connection handled after the listener failed; UAPI is silently dead", cause)
-		}
-		select {
-		case <-first.closed:
-		default:
-			t.Fatalf("%v: failed listener not closed", cause)
-		}
-	}
-}
-
-func TestServeUAPIExitsWhenSocketCannotBeReopened(t *testing.T) {
-	fastUAPIReopen(t)
-	reopen := func() (net.Listener, error) { return nil, syscall.EMFILE }
+func TestServeUAPISurvivesTransientAcceptErrors(t *testing.T) {
+	oldMin, oldMax := uapiAcceptMinDelay, uapiAcceptMaxDelay
+	uapiAcceptMinDelay, uapiAcceptMaxDelay = time.Millisecond, 2*time.Millisecond
+	t.Cleanup(func() { uapiAcceptMinDelay, uapiAcceptMaxDelay = oldMin, oldMax })
+	client, server := net.Pipe()
+	defer client.Close()
+	l := &scriptedListener{steps: []func() (net.Conn, error){
+		func() (net.Conn, error) { return nil, syscall.EMFILE },
+		func() (net.Conn, error) { return nil, syscall.EMFILE },
+		func() (net.Conn, error) { return server, nil },
+		func() (net.Conn, error) { return nil, net.ErrClosed },
+	}}
+	h := countingHandler{handled: make(chan net.Conn, 1)}
 	errs := make(chan error, 1)
-	go serveUAPI(t.Context(), countingHandler{}, newDeadAfterErrorListener(syscall.EMFILE), reopen, errs)
-	select {
-	case err := <-errs:
-		if !errors.Is(err, syscall.EMFILE) {
-			t.Fatalf("unexpected error %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("gateway kept running without a UAPI socket")
-	}
-}
-
-func TestServeUAPIStopsQuietlyOnShutdown(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	l := newDeadAfterErrorListener(nil)
-	l.failed = true // Accept blocks until Close
-	errs := make(chan error, 1)
-	done := make(chan struct{})
-	go func() {
-		serveUAPI(ctx, countingHandler{}, l, func() (net.Listener, error) { return nil, errors.New("reopen on shutdown") }, errs)
-		close(done)
-	}()
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("serveUAPI did not stop on shutdown")
-	}
-	select {
-	case err := <-errs:
-		t.Fatalf("shutdown reported as failure: %v", err)
-	default:
-	}
-}
-
-// fakeUAPIServer answers "get=1" on a unix socket like a gateway would.
-func fakeUAPIServer(t *testing.T, answer string) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "uapi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	path := filepath.Join(dir, "awg2.sock")
-	l, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { l.Close() })
-	go func() {
-		for {
-			c, err := l.Accept()
-			if err != nil {
-				return
-			}
-			buf := make([]byte, 64)
-			_, _ = c.Read(buf)
-			_, _ = io.WriteString(c, answer)
-			c.Close()
-		}
-	}()
-	return dir
-}
-
-func TestHealthcheckProbesUAPI(t *testing.T) {
-	cfg := validTestConfig()
-	cfg.Interface = "awg2"
-	path := writeTestConfig(t, cfg)
-	fakeCommands(t, nil)
-	old := uapiSocketDirectory
-	t.Cleanup(func() { uapiSocketDirectory = old })
-
-	uapiSocketDirectory = fakeUAPIServer(t, "private_key=00\nerrno=0\n\n")
-	if err := runHealthcheck([]string{"--config", path}); err != nil {
-		t.Fatalf("answering UAPI reported unhealthy: %v", err)
-	}
-	uapiSocketDirectory = fakeUAPIServer(t, "errno=1\n\n")
-	if err := runHealthcheck([]string{"--config", path}); err == nil {
-		t.Fatal("UAPI error reported healthy")
-	}
-	uapiSocketDirectory = t.TempDir() // no socket
-	if err := runHealthcheck([]string{"--config", path}); err == nil {
-		t.Fatal("missing UAPI socket reported healthy")
-	}
-}
-
-// TestUAPIListenerRecoversFromDeletedSocket runs the real amneziawg-go
-// listener. It needs the default socket directory to be writable (root).
-func TestUAPIListenerRecoversFromDeletedSocket(t *testing.T) {
-	if err := os.MkdirAll("/var/run/amneziawg", 0o755); err != nil {
-		t.Skipf("socket directory not writable: %v", err)
-	}
-	fastUAPIReopen(t)
-	iface := fmt.Sprintf("twt%d", os.Getpid()%100000)
-	sock := filepath.Join("/var/run/amneziawg", iface+".sock")
-	l, err := openUAPI(iface)
-	if err != nil {
-		t.Skipf("uapi listen: %v", err)
-	}
-	h := countingHandler{handled: make(chan net.Conn, 4)}
-	errs := make(chan error, 1)
-	go serveUAPI(t.Context(), h, l, func() (net.Listener, error) { return openUAPI(iface) }, errs)
-	if err := os.Remove(sock); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if c, err := net.Dial("unix", sock); err == nil {
-			defer c.Close()
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("UAPI socket not recreated after deletion")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	serveUAPI(h, l, errs)
 	select {
 	case c := <-h.handled:
-		c.Close()
-	case err := <-errs:
-		t.Fatal(err)
+		if c != server {
+			t.Fatal("wrong connection handled")
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("connection on the recreated socket not handled")
+		t.Fatal("connection after transient errors not handled")
+	}
+	if err := <-errs; !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("serveUAPI ended with %v", err)
 	}
 }

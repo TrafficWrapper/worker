@@ -123,9 +123,9 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 			"privateKey":  st.Reality.PrivateKey,
 			"shortIds":    shortIDs,
 		}
-		if cfg.RealityMaxTimeDiff > 0 {
+		if maxTimeDiff := realityMaxTimeDiff(cfg); maxTimeDiff > 0 {
 			// Xray takes milliseconds; 0 (unset) accepts any age.
-			realitySettings["maxTimeDiff"] = cfg.RealityMaxTimeDiff.Milliseconds()
+			realitySettings["maxTimeDiff"] = maxTimeDiff.Milliseconds()
 		}
 		streamSettings := map[string]any{
 			"network":         profile.Network,
@@ -199,6 +199,32 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 		xcfg["dns"] = dns
 	}
 	return xcfg
+}
+
+// realityTimeCheckSuspended records that maxTimeDiff is left out because the
+// host clock is skewed, so the change is logged once.
+var realityTimeCheckSuspended atomic.Bool
+
+// realityMaxTimeDiff is the maxTimeDiff to render. Xray compares the client
+// time with the host clock, which the orchestrator time correction does not
+// reach, so the check is off while the host clock is known to be wrong;
+// self_check reports "clock" meanwhile.
+func realityMaxTimeDiff(cfg envConfig) time.Duration {
+	if cfg.RealityMaxTimeDiff <= 0 {
+		return 0
+	}
+	skewed := platformClockSkewed()
+	if skewed != realityTimeCheckSuspended.Swap(skewed) {
+		if skewed {
+			slog.Warn("REALITY_MAX_TIME_DIFF not enforced while the worker clock differs from the orchestrator")
+		} else {
+			slog.Info("REALITY_MAX_TIME_DIFF enforced again", "max_time_diff", cfg.RealityMaxTimeDiff)
+		}
+	}
+	if skewed {
+		return 0
+	}
+	return cfg.RealityMaxTimeDiff
 }
 
 // xrayConfigRejected is set while the rendered Xray config is refused and the

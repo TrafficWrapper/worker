@@ -41,4 +41,29 @@ check auto fd00::1 ""
 check auto "" ""
 check 2a01:4f8::7 2a01:4f8::9 2a01:4f8::7
 check "" 2a01:4f8::9 ""
+
+# REALITY_MAX_TIME_DIFF stays off unless the operator set it: re-running
+# install.sh on an install whose .env predates the key must not enable it.
+check_max_time_diff() {
+  local previous=$1 want=$2 got
+  rm -f "$work/.env" "$work"/.env.bak.*
+  if [ -n "$previous" ]; then
+    printf '%s\n' "$previous" >"$work/.env"
+  fi
+  (
+    cd "$work"
+    PATH="$work/bin:$PATH" XRAY_PORT=2053 AWG_PORT=51888 CAMOUFLAGE_DOMAIN=www.example.net EGRESS_IP=203.0.113.9 \
+      bash -c '. ./funcs.sh; write_env' >/dev/null 2>&1
+  )
+  got=$(grep '^REALITY_MAX_TIME_DIFF=' "$work/.env" | cut -d= -f2-)
+  if [ "$got" != "$want" ]; then
+    echo "REALITY_MAX_TIME_DIFF with previous .env '$previous': got '$got', want '$want'" >&2
+    exit 1
+  fi
+}
+
+check_max_time_diff "" ""
+check_max_time_diff "XRAY_PORT=2053" ""
+check_max_time_diff "REALITY_MAX_TIME_DIFF=120" 120
+check_max_time_diff "REALITY_MAX_TIME_DIFF=300" 300
 echo "install env tests passed"

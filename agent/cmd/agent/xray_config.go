@@ -123,9 +123,9 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 			"privateKey":  st.Reality.PrivateKey,
 			"shortIds":    shortIDs,
 		}
-		if maxTimeDiff := realityMaxTimeDiff(cfg); maxTimeDiff > 0 {
+		if cfg.RealityMaxTimeDiff > 0 {
 			// Xray takes milliseconds; 0 (unset) accepts any age.
-			realitySettings["maxTimeDiff"] = maxTimeDiff.Milliseconds()
+			realitySettings["maxTimeDiff"] = cfg.RealityMaxTimeDiff.Milliseconds()
 		}
 		streamSettings := map[string]any{
 			"network":         profile.Network,
@@ -201,32 +201,6 @@ func xrayConfigDocument(cfg envConfig, st stateFile, devices []approvedDevice) m
 	return xcfg
 }
 
-// realityTimeCheckSuspended records that maxTimeDiff is left out because the
-// host clock is skewed, so the change is logged once.
-var realityTimeCheckSuspended atomic.Bool
-
-// realityMaxTimeDiff is the maxTimeDiff to render. Xray compares the client
-// time with the host clock, which the orchestrator time correction does not
-// reach, so the check is off while the host clock is known to be wrong;
-// self_check reports "clock" meanwhile.
-func realityMaxTimeDiff(cfg envConfig) time.Duration {
-	if cfg.RealityMaxTimeDiff <= 0 {
-		return 0
-	}
-	skewed := platformClockSkewed()
-	if skewed != realityTimeCheckSuspended.Swap(skewed) {
-		if skewed {
-			slog.Warn("REALITY_MAX_TIME_DIFF not enforced while the worker clock differs from the orchestrator")
-		} else {
-			slog.Info("REALITY_MAX_TIME_DIFF enforced again", "max_time_diff", cfg.RealityMaxTimeDiff)
-		}
-	}
-	if skewed {
-		return 0
-	}
-	return cfg.RealityMaxTimeDiff
-}
-
 // xrayConfigRejected is set while the rendered Xray config is refused and the
 // last valid one stays in use; self_check reports it.
 var xrayConfigRejected atomic.Bool
@@ -256,9 +230,8 @@ func xrayDirectOutbound(cfg envConfig) map[string]any {
 	return outbound
 }
 
-// xrayDNS drops private addresses and the worker's own public addresses from
-// every answer, so a public name can never resolve to the agent, the host or
-// a metadata service.
+// xrayDNS drops private addresses from every answer, so a public name can
+// never resolve to the agent, the host or a metadata service.
 func xrayDNS(cfg envConfig) map[string]any {
 	if cfg.AllowPrivateEgress {
 		return nil
@@ -267,7 +240,7 @@ func xrayDNS(cfg envConfig) map[string]any {
 		"queryStrategy": "UseIPv4",
 		"servers": []any{map[string]any{
 			"address":       "localhost",
-			"unexpectedIPs": append(slices.Clone(privateEgressCIDRs), workerAddresses(cfg)...),
+			"unexpectedIPs": privateEgressCIDRs,
 		}},
 	}
 }

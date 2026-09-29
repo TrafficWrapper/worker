@@ -2,10 +2,12 @@ server_tokens off;
 
 # Every REALITY client reaches this server from the Xray container's address,
 # so there are no per-IP limits: telemetry is limited per device header, and
-# the rest only by generous totals. APK downloads have their own connection
+# the rest only by generous totals. The telemetry total only guards the
+# agent: the device header is not authenticated here, so the agent shares
+# the orchestrator budget out, keeping unknown device IDs apart. APK downloads have their own connection
 # cap so they cannot take the slots config.json and the manifest need.
 limit_req_zone $http_x_tw_device zone=tw_telemetry_device:1m rate=20r/m;
-limit_req_zone $server_name zone=tw_telemetry_all:64k rate=2r/s;
+limit_req_zone $server_name zone=tw_telemetry_all:64k rate=10r/s;
 limit_conn_zone $server_name zone=tw_conn_all:64k;
 limit_conn_zone $server_name zone=tw_conn_apk:64k;
 limit_req_status 429;
@@ -59,6 +61,12 @@ server {
         proxy_set_header X-TW-Ts $http_x_tw_ts;
         proxy_set_header X-TW-Nonce $http_x_tw_nonce;
         proxy_set_header X-TW-Sig $http_x_tw_sig;
+    }
+
+    # Hidden files and directories are in-progress downloads and temporary
+    # writes, never published content.
+    location ~ /\. {
+        return 404;
     }
 
     location ~ ^/tw/[^/]+\.apk$ {
